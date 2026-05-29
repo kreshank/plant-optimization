@@ -40,6 +40,10 @@ stages:
     enabled: true
     workers: 2
     service_time_seconds: 1
+  outbound_scan:
+    enabled: true
+    workers: 2
+    service_time_seconds: 1
 
 scan_seconds_per_item: 0
 

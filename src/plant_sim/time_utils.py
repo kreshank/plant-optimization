@@ -61,6 +61,22 @@ def wash_cutoff_minutes(calendar: CalendarConfig) -> float:
     return time_to_minutes(parse_time_of_day(calendar.wash_cutoff_time))
 
 
+def operating_window_bounds(
+    first_calendar_day: int,
+    last_calendar_day: int,
+    calendar: CalendarConfig,
+) -> tuple[float, float]:
+    """Sim-minute range from first day open through last day wash cutoff."""
+    start = first_calendar_day * 24 * 60 + day_open_minutes(calendar)
+    end = last_calendar_day * 24 * 60 + wash_cutoff_minutes(calendar)
+    return start, end
+
+
+def operating_window_minutes(calendar: CalendarConfig) -> float:
+    """Length of one operating day (open → wash cutoff)."""
+    return max(0.0, wash_cutoff_minutes(calendar) - day_open_minutes(calendar))
+
+
 def deadline_minutes(value: str) -> float:
     return time_to_minutes(parse_time_of_day(value))
 
@@ -69,6 +85,28 @@ def clock_from_sim(sim_minutes: float) -> tuple[int, float]:
     day_index = int(sim_minutes // (24 * 60))
     within = sim_minutes % (24 * 60)
     return day_index, within
+
+
+DAY_NAMES_BY_INDEX = [k for k, v in sorted(WEEKDAY_MAP.items(), key=lambda x: x[1])]
+
+
+def sim_clock_display(
+    sim_minutes: float,
+    calendar: CalendarConfig,
+    start_weekday: int = 0,
+) -> dict[str, str | int | float]:
+    """Calendar day index, weekday name, and HH:MM for UI playback."""
+    day_index, within = clock_from_sim(sim_minutes)
+    weekday_idx = (start_weekday + day_index) % 7
+    weekday = DAY_NAMES_BY_INDEX[weekday_idx]
+    operating = is_operating_day(weekday_idx, calendar)
+    return {
+        "sim_minutes": round(sim_minutes, 2),
+        "calendar_day": day_index + 1,
+        "weekday": weekday,
+        "time_of_day": format_minutes(within),
+        "operating": operating,
+    }
 
 
 def break_intervals_minutes(calendar: CalendarConfig) -> list[tuple[float, float]]:
@@ -83,6 +121,18 @@ def minutes_until_break_ends(within_day: float, breaks: list[tuple[float, float]
         if start <= within_day < end:
             return end - within_day
     return 0.0
+
+
+def calendar_wait_minutes(
+    within_day: float,
+    shift: StageShift | None,
+    breaks: list[tuple[float, float]],
+) -> float:
+    """Minutes until shift open and any calendar break ends (0 = may work)."""
+    return max(
+        minutes_until_break_ends(within_day, breaks),
+        delay_for_shift(within_day, shift),
+    )
 
 
 def delay_for_shift(within_day: float, shift: StageShift | None) -> float:

@@ -6,6 +6,9 @@ from dataclasses import dataclass, field
 
 from plant_sim.config_models import PlantConfig
 from plant_sim.time_utils import deadline_minutes, format_minutes
+from plant_sim.unit_tracking import QueueTimeSeries, UnitMetrics, unit_id
+
+MAX_FLOW_EVENTS = 12_000
 
 
 @dataclass
@@ -40,6 +43,18 @@ class MetricsCollector:
     items_deferred_wash: int = 0
     labor_minutes_by_role: dict[str, float] = field(default_factory=dict)
     max_queue_by_stage: dict[str, float] = field(default_factory=dict)
+    unit_metrics: dict[str, UnitMetrics] = field(default_factory=dict)
+    queue_time_series: QueueTimeSeries | None = None
+    flow_events: list[dict] = field(default_factory=list)
+    washer_max_queue: dict[str, float] = field(default_factory=dict)
+    _sim_duration_minutes: float = 0.0
+    playback_start_minutes: float = 0.0
+    playback_horizon_minutes: float = 0.0
+    _record_flow_events: bool = False
+
+    @property
+    def sim_duration_minutes(self) -> float:
+        return self._sim_duration_minutes
 
     def ensure_stage(self, stage_id: str, workers: int, labor_role: str | None) -> None:
         if stage_id not in self.stage_metrics:
@@ -73,6 +88,75 @@ class MetricsCollector:
         prev = self.max_queue_by_stage.get(stage_id, 0.0)
         self.max_queue_by_stage[stage_id] = max(prev, depth)
 
+    def ensure_unit(self, stage: str, index: int) -> UnitMetrics:
+        uid = unit_id(stage, index)
+        if uid not in self.unit_metrics:
+            self.unit_metrics[uid] = UnitMetrics(
+                unit_id=uid, stage_id=stage, index=index
+            )
+        return self.unit_metrics[uid]
+
+    def record_unit_queue(self, stage: str, index: int, depth: float) -> None:
+        um = self.ensure_unit(stage, index)
+        um.max_queue = max(um.max_queue, depth)
+        um.queue_sum += depth
+        um.queue_samples += 1
+        self.record_queue_depth(unit_id(stage, index), depth)
+        stage_prev = self.max_queue_by_stage.get(stage, 0.0)
+        self.max_queue_by_stage[stage] = max(stage_prev, depth)
+
+    def record_unit_stage(
+        self,
+        stage: str,
+        index: int,
+        service_minutes: float,
+        wait_minutes: float = 0.0,
+    ) -> None:
+        um = self.ensure_unit(stage, index)
+        um.items_processed += 1
+        um.total_service_minutes += service_minutes
+        um.total_wait_minutes += wait_minutes
+
+    def init_time_series(
+        self, interval_minutes: float, *, record_flow_events: bool = True
+    ) -> None:
+        self.queue_time_series = QueueTimeSeries(interval_minutes=interval_minutes)
+        self._record_flow_events = record_flow_events
+
+    def log_flow_event(self, sim_minutes: float, kind: str, **fields) -> None:
+        if not self._record_flow_events:
+            return
+        if len(self.flow_events) >= MAX_FLOW_EVENTS:
+            return
+        row: dict = {"t": round(sim_minutes, 3), "kind": kind}
+        row.update(fields)
+        self.flow_events.append(row)
+
+    def record_washer_queue(self, washer_id: str, depth: float) -> None:
+        prev = self.washer_max_queue.get(washer_id, 0.0)
+        self.washer_max_queue[washer_id] = max(prev, depth)
+        self.record_queue_depth(washer_id, depth)
+        self.record_queue_depth("wash", depth)
+
+    def append_time_series_sample(self, sim_minutes: float, snapshot: dict) -> None:
+        if self.queue_time_series is None:
+            return
+        self.queue_time_series.append(sim_minutes, snapshot)
+        for uid, data in snapshot.get("units", {}).items():
+            parsed = uid.split(":", 1)
+            if len(parsed) != 2:
+                continue
+            stage, idx_s = parsed
+            try:
+                idx = int(idx_s)
+            except ValueError:
+                continue
+            depth = float(data.get("queue_depth", 0))
+            um = self.ensure_unit(stage, idx)
+            um.max_queue = max(um.max_queue, depth)
+            um.queue_sum += depth
+            um.queue_samples += 1
+
     def record_delivery_ready(self, sim_minutes: float, day_open: float) -> None:
         """Record when delivery scan finishes (next-morning readiness uses day boundary)."""
         _, within = divmod(sim_minutes, 24 * 60)
@@ -92,6 +176,7 @@ class MetricsCollector:
         return cost
 
     def finalize_utilization(self, sim_duration_minutes: float) -> None:
+        self._sim_duration_minutes = sim_duration_minutes
         for sm in self.stage_metrics.values():
             sm.utilization = sm.compute_utilization(sim_duration_minutes)
 
@@ -111,6 +196,13 @@ class MetricsCollector:
             ready_str = format_minutes(within)
 
         return {
+            "playback_start_minutes": round(self.playback_start_minutes, 2),
+            "playback_horizon_minutes": round(self.playback_horizon_minutes, 2),
+            "playback_window_minutes": round(
+                max(0.0, self.playback_horizon_minutes - self.playback_start_minutes),
+                2,
+            ),
+            "sim_duration_minutes": round(self._sim_duration_minutes, 2),
             "items_injected": self.items_injected,
             "items_completed": self.items_completed,
             "items_lost_estimate": round(self.items_lost, 2),
@@ -137,4 +229,14 @@ class MetricsCollector:
             "labor_minutes_by_role": {
                 k: round(v, 2) for k, v in self.labor_minutes_by_role.items()
             },
+            "units": {
+                uid: um.to_dict(self._sim_duration_minutes)
+                for uid, um in self.unit_metrics.items()
+            },
+            "time_series": (
+                self.queue_time_series.to_dict()
+                if self.queue_time_series
+                else None
+            ),
+            "flow_events": self.flow_events,
         }

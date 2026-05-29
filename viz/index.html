@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Plant flow visualizer</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header>
+    <h1>Plant flow</h1>
+    <button id="btn-refresh" type="button">Run simulation</button>
+    <button id="btn-week" type="button" title="7 operating days">Full week</button>
+    <span id="sim-clock" class="sim-clock">—</span>
+    <span id="status">Loading…</span>
+  </header>
+  <main>
+    <aside id="sidebar">
+      <section>
+        <h2>KPIs</h2>
+        <div id="kpi">—</div>
+        <div id="error"></div>
+      </section>
+      <section>
+        <h2>Simulation</h2>
+        <label>Operating days
+          <input type="number" id="inp-sim-days" min="1" max="14" step="1" value="1" />
+        </label>
+        <label>Snapshot interval (sim minutes)
+          <input type="number" id="inp-sample-interval" min="1" max="60" step="1" value="5" title="Record plant state every N sim minutes" />
+        </label>
+        <p class="hint">Smaller = smoother queues &amp; washers; larger = faster re-run.</p>
+        <div id="sim-progress-wrap" class="sim-progress-wrap hidden">
+          <progress id="sim-progress" max="100" value="0"></progress>
+          <div id="sim-progress-label" class="sim-progress-label">—</div>
+        </div>
+        <label>Playback speed
+          <input type="number" id="inp-playback-speed" min="0.25" max="120" step="0.25" value="1" title="Sim minutes per real second at 1×" />
+        </label>
+        <p class="hint"><strong>1×</strong> ≈ one sim minute per real second (with 1 min snapshots). <strong>60×</strong> ≈ one sim hour per second.</p>
+      </section>
+      <section>
+        <h2>Quick overrides</h2>
+        <p class="hint">In memory only — does not write YAML.</p>
+        <label>Items per truck
+          <input type="number" id="inp-items-per-truck" step="0.01" />
+        </label>
+        <label>Routing: spotting %
+          <input type="number" id="inp-pct-spot" min="0" max="100" step="0.5" />
+        </label>
+        <label>Routing: steam %
+          <input type="number" id="inp-pct-steam" min="0" max="100" step="0.5" />
+        </label>
+        <label>General press throughput / hr
+          <input type="number" id="inp-press-rate" min="1" step="0.5" />
+        </label>
+      </section>
+      <section>
+        <h2>Timeline</h2>
+        <div id="time-label">—</div>
+        <input type="range" id="inp-timeline" min="0" max="0" value="0" disabled />
+        <div class="timeline-btns">
+          <button id="btn-play" type="button" disabled>Play</button>
+          <button id="btn-live" type="button" disabled>Live (end)</button>
+        </div>
+      </section>
+      <section id="unit-panel" class="hidden">
+        <h2>Selected worker</h2>
+        <div id="unit-detail">Click a washer, presser, or spotter.</div>
+      </section>
+      <section>
+        <h2>Bottlenecks</h2>
+        <div id="bottlenecks">—</div>
+      </section>
+    </aside>
+    <div id="canvas-wrap">
+      <canvas id="flow-canvas"></canvas>
+      <div id="legend">
+        <div id="legend-clock" class="legend-clock">—</div>
+        <strong>View</strong> drag background = pan · wheel = zoom · drag group title = move<br />
+        <button type="button" id="btn-fit-view" class="legend-btn">Fit view</button>
+        <button type="button" id="btn-reset-layout" class="legend-btn">Reset layout</button><br />
+        Washer BIN = basket before drum; dashed red = QC rework loop.
+      </div>
+    </div>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>

@@ -14,6 +14,7 @@ STAGE_PREDECESSORS: dict[str, tuple[str, ...]] = {
     "general_press": ("separation",),
     "final_qc": (),
     "delivery_scan": ("final_qc",),
+    "outbound_scan": ("delivery_scan",),
 }
 
 QC_PREDECESSORS: dict[str, tuple[str, ...]] = {
@@ -111,7 +112,7 @@ class FlowTracker:
             "wash",
             "separation",
         ]
-        if stage not in chain:
+        if stage not in chain or stage == "separation":
             return
         idx = chain.index(stage)
         if idx == 0:

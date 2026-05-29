@@ -13,6 +13,8 @@ class WasherPoolState:
 
     busy_by_type: dict[str, int] = field(default_factory=dict)
     count_by_type: dict[str, int] = field(default_factory=dict)
+    """Round-robin among empty drums (largest capacity first)."""
+    dispatch_index: int = 0
 
     def register_type(self, resource_id: str, count: int) -> None:
         self.count_by_type[resource_id] = count

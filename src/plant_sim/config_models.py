@@ -102,6 +102,7 @@ class StagesConfig(BaseModel):
     final_qc: StageConfig
     spotting: StageConfig
     delivery_scan: StageConfig
+    outbound_scan: StageConfig
 
 
 class RoutingAfterSeparation(BaseModel):
@@ -213,12 +214,19 @@ class InputsConfig(BaseModel):
 
 
 class TransfersConfig(BaseModel):
+    """Delays between sections, in sim minutes (e.g. 0.083 ≈ 5 seconds)."""
+
+    after_scan_in: float = Field(default=0, ge=0)
+    to_wash: float = Field(default=0, ge=0)
     after_wash: float = Field(default=0, ge=0)
     after_separation: float = Field(default=0, ge=0)
     after_spotting: float = Field(default=0, ge=0)
     after_steam_tunnel: float = Field(default=0, ge=0)
     after_jacket_press: float = Field(default=0, ge=0)
     after_general_press: float = Field(default=0, ge=0)
+    after_final_qc: float = Field(default=0, ge=0)
+    after_delivery_scan: float = Field(default=0, ge=0)
+    after_outbound_scan: float = Field(default=0, ge=0)
 
 
 class WipConfig(BaseModel):

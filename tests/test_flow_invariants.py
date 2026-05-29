@@ -78,19 +78,22 @@ class TestWorkerCapacity:
         config = _load_fixture("tiny_plant.yaml")
         workers = config.stages.scan_in.worker_count()
         sim = PlantSimulation(config, ROOT, seed=0, track_flow=True)
-        pool = sim._scan_resources["normal"]
         peak_in_service: list[int] = []
 
         def monitor():
             while True:
-                peak_in_service.append(pool.count)
+                busy = sum(
+                    1
+                    for s in sim._scan_stations
+                    if s.service.count >= s.service.capacity
+                )
+                peak_in_service.append(busy)
                 yield sim.env.timeout(0.05)
 
         sim.env.process(monitor())
         result = sim.run()
 
-        assert max(peak_in_service) <= pool.capacity
-        assert pool.capacity == workers
+        assert max(peak_in_service) <= workers
         assert result.metrics.items_completed == 20
 
 
