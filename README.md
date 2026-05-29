@@ -112,16 +112,6 @@ Tests: `pytest` (fixtures only). `pytest tests/test_flow_invariants.py -v` for p
 
 ---
 
-## Setup
-
-```bash
-wsl
-cd <path-to-repo>
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e ".[dev]"
-```
-
 Create local config from `config.example/`, then `python scripts/run_baseline.py`.
 
 `config/`, `data/`, `outputs/`, and `.venv/` are gitignored.
