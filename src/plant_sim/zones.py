@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections import deque
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Callable
@@ -24,6 +25,11 @@ class PlantZoneState:
     trucks_arrived: int = 0
     pre_scan_waiting: int = 0
     post_scan_waiting: int = 0
+    post_scan_fifo: deque[int] = field(default_factory=deque)
+    wash_release_waiters: dict[int, simpy.Event] = field(default_factory=dict)
+    item_washer_line: dict[int, str] = field(default_factory=dict)
+    """Only this washer may pull from post_scan_fifo until it starts a cycle."""
+    active_washer_id: str | None = None
     separation_backlog: int = 0
 
     def snapshot_scan_workers(self, stations: list[ScanStation]) -> dict[str, dict]:
@@ -120,11 +126,9 @@ class ScanStation:
                     self.env.now,
                     "move",
                     fr=self.station_id,
-                    to="post_scan_waiting",
+                    to="scan_out",
                     n=1,
                 )
-            if self.zones:
-                self.zones.post_scan_waiting += 1
 
 
 @dataclass
@@ -228,7 +232,7 @@ class WorkerStation:
 
 @dataclass
 class WasherBinLine:
-    """Basket in front of washer; full batch cycle; releases to separation backlog."""
+    """Basket in front of washer; pulls from post_scan backlog; batch cycle."""
 
     washer_id: str
     wdef: WasherResourceDef
@@ -241,30 +245,11 @@ class WasherBinLine:
     in_cycle: bool = False
     batch_size: int = 0
     cycle_started_at: float = 0.0
-    _pending: list[tuple[int, simpy.Event]] = field(default_factory=list)
     _sibling_lines: list[WasherBinLine] | None = field(default=None, repr=False)
+    _washer_pool: WasherPoolState | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         self.env.process(self._operator())
-
-    def _plant_pending_count(self) -> int:
-        lines = self._sibling_lines or [self]
-        return sum(len(ln._pending) for ln in lines)
-
-    def _drain_all_pending_into_bin(self) -> None:
-        while self._pending and len(self.bin_items) < self.wdef.capacity_items:
-            self._pull_pending_into_bin()
-
-    def _ready_for_partial_batch(self) -> bool:
-        """Start a non-full batch only when no reserve remains plant-wide."""
-        policy = self.config.policies.wash_batching
-        if not policy.allow_partial_load or not self.bin_items:
-            return False
-        if self._pending or self.zones.post_scan_waiting > 0:
-            return False
-        if self._plant_pending_count() > 0:
-            return False
-        return True
 
     @property
     def bin_fill(self) -> int:
@@ -279,49 +264,82 @@ class WasherBinLine:
 
     @property
     def queue_depth(self) -> int:
-        return self.bin_fill + len(self._pending) + (
-            self.batch_size if self.in_cycle else 0
-        )
+        return self.bin_fill + (self.batch_size if self.in_cycle else 0)
 
     def spare_capacity(self) -> int:
-        """Items that can still enter this bin (not in cycle)."""
         if self.in_cycle:
             return 0
-        return max(
-            0,
-            self.wdef.capacity_items - self.bin_fill - len(self._pending),
-        )
+        return max(0, self.wdef.capacity_items - self.bin_fill)
 
-    def enqueue_to_bin(self, item_id: int) -> simpy.Event:
-        if self.spare_capacity() <= 0:
-            raise RuntimeError(
-                f"{self.washer_id}: bin at capacity "
-                f"({self.bin_fill}+{len(self._pending)}/{self.wdef.capacity_items})"
-            )
-        done = self.env.event()
-        if self._fill_minutes() <= 0 and self.bin_fill < self.wdef.capacity_items:
-            self.bin_items.append((item_id, done))
-            self.log_event(
-                self.env.now,
-                "move",
-                fr="post_scan_waiting",
-                to=f"{self.washer_id}:bin",
-                n=1,
-            )
-        else:
-            self._pending.append((item_id, done))
-        self.metrics.record_washer_queue(self.washer_id, self.queue_depth)
-        return done
+    def _min_batch_items(self) -> int:
+        cap = self.wdef.capacity_items
+        ratio = self.config.policies.wash_batching.min_fill_ratio
+        return max(1, math.ceil(cap * ratio))
 
     def _fill_minutes(self) -> float:
         if self.config.policies.wash_batching.start_when_full_or_idle:
             return DEFAULT_BIN_FILL_MINUTES
         return 0.0
 
-    def _pull_pending_into_bin(self) -> None:
-        if not self._pending or len(self.bin_items) >= self.wdef.capacity_items:
-            return
-        item_id, done = self._pending.pop(0)
+    def _all_lines(self) -> list[WasherBinLine]:
+        return self._sibling_lines or [self]
+
+    def _sync_active_filler(self) -> None:
+        lines = self._all_lines()
+        pool = self._washer_pool or WasherPoolState()
+        active_id = self.zones.active_washer_id
+        if active_id:
+            active_ln = next((ln for ln in lines if ln.washer_id == active_id), None)
+            if active_ln is None or active_ln.in_cycle:
+                self.zones.active_washer_id = None
+        if self.zones.active_washer_id is None:
+            chosen = choose_active_filler(lines, pool)
+            if chosen is not None:
+                self.zones.active_washer_id = chosen.washer_id
+
+    def _is_active_filler(self) -> bool:
+        self._sync_active_filler()
+        return self.zones.active_washer_id == self.washer_id
+
+    def _has_full_bin_waiting(self) -> bool:
+        cap = self.wdef.capacity_items
+        return any(
+            not ln.in_cycle and ln.bin_fill >= cap for ln in self._all_lines()
+        )
+
+    def _can_start_cycle(self) -> bool:
+        cap = self.wdef.capacity_items
+        n = self.bin_fill
+        if n == 0:
+            return False
+        if self.zones.post_scan_fifo:
+            return n >= cap
+        return n >= self._min_batch_items()
+
+    def _should_start_now(self) -> bool:
+        ready = [
+            ln
+            for ln in self._all_lines()
+            if not ln.in_cycle and ln._can_start_cycle()
+        ]
+        if not ready:
+            return False
+        best = max(ready, key=lambda ln: (ln.bin_fill, ln.wdef.capacity_items))
+        return best.washer_id == self.washer_id
+
+    def _pull_one_from_backlog(self) -> bool:
+        cap = self.wdef.capacity_items
+        if (
+            self.in_cycle
+            or not self._is_active_filler()
+            or len(self.bin_items) >= cap
+            or not self.zones.post_scan_fifo
+        ):
+            return False
+        item_id = self.zones.post_scan_fifo.popleft()
+        self.zones.post_scan_waiting = max(0, self.zones.post_scan_waiting - 1)
+        done = self.zones.wash_release_waiters.pop(item_id)
+        self.zones.item_washer_line[item_id] = self.washer_id
         self.bin_items.append((item_id, done))
         self.log_event(
             self.env.now,
@@ -330,130 +348,166 @@ class WasherBinLine:
             to=f"{self.washer_id}:bin",
             n=1,
         )
+        self.metrics.record_washer_queue(self.washer_id, self.queue_depth)
+        return True
 
-    def _spread_fill_into_bin(self) -> simpy.events.Generator:
-        """Move pending items into the basket evenly across the fill window."""
+    def _spread_pull_from_backlog(self) -> simpy.events.Generator:
+        """Pull from wash backlog into basket evenly across the fill window."""
+        cap = self.wdef.capacity_items
         fill_duration = self._fill_minutes()
         if fill_duration <= 0:
-            while self._pending and len(self.bin_items) < self.wdef.capacity_items:
-                self._pull_pending_into_bin()
+            while (
+                self._is_active_filler()
+                and self.zones.post_scan_fifo
+                and len(self.bin_items) < cap
+            ):
+                if not self._pull_one_from_backlog():
+                    break
             return
 
         fill_end = self.env.now + fill_duration
         while (
             self.env.now < fill_end
-            and self._pending
-            and len(self.bin_items) < self.wdef.capacity_items
+            and self._is_active_filler()
+            and self.zones.post_scan_fifo
+            and len(self.bin_items) < cap
         ):
+            if not self._pull_one_from_backlog():
+                break
             remaining_time = fill_end - self.env.now
-            slots = self.wdef.capacity_items - len(self.bin_items)
-            n = min(len(self._pending), slots)
+            slots = cap - len(self.bin_items)
+            n = min(len(self.zones.post_scan_fifo), slots)
             if n <= 0 or remaining_time <= 0:
                 break
-            self._pull_pending_into_bin()
-            n -= 1
-            if n <= 0:
-                continue
             yield self.env.timeout(remaining_time / n)
+
+    def _run_cycle(self) -> simpy.events.Generator:
+        batch = self.bin_items[:]
+        self.bin_items = []
+        self.in_cycle = True
+        self.batch_size = len(batch)
+        self.cycle_started_at = self.env.now
+        if self.zones.active_washer_id == self.washer_id:
+            self.zones.active_washer_id = None
+        self.log_event(
+            self.env.now,
+            "wash_batch_start",
+            washer=self.washer_id,
+            count=self.batch_size,
+        )
+        self.metrics.record_washer_queue(self.washer_id, self.queue_depth)
+
+        yield self.env.timeout(self.wdef.cycle_minutes)
+
+        per_item = self.wdef.cycle_minutes / max(self.batch_size, 1)
+        for item_id, done in batch:
+            self.metrics.record_stage(
+                "wash", 1, "wash", per_item, wait_minutes=0.0, count=1
+            )
+            if not done.triggered:
+                done.succeed()
+
+        self.log_event(
+            self.env.now,
+            "wash_batch_end",
+            washer=self.washer_id,
+            count=self.batch_size,
+        )
+
+        self.in_cycle = False
+        self.batch_size = 0
+        self.metrics.record_washer_queue(self.washer_id, self.queue_depth)
 
     def _operator(self) -> simpy.events.Generator:
         cap = self.wdef.capacity_items
+
         while True:
-            while not self._pending and not self.bin_items:
+            if self.in_cycle:
                 yield self.env.timeout(0.25)
+                continue
 
-            if self._pending and len(self.bin_items) < cap:
-                yield from self._spread_fill_into_bin()
+            if self.bin_fill >= cap and self._should_start_now():
+                yield from self._run_cycle()
+                continue
 
-            self._drain_all_pending_into_bin()
+            if self._has_full_bin_waiting() and not self._can_start_cycle():
+                yield self.env.timeout(0.25)
+                continue
 
-            if self._pending and not self.bin_items:
-                self._pull_pending_into_bin()
+            if not self._is_active_filler():
+                yield self.env.timeout(0.25)
+                continue
+
+            if self.bin_fill < cap and self.zones.post_scan_fifo:
+                if self._fill_minutes() > 0:
+                    yield from self._spread_pull_from_backlog()
+                while (
+                    self.bin_fill < cap
+                    and self.zones.post_scan_fifo
+                    and self._is_active_filler()
+                ):
+                    if not self._pull_one_from_backlog():
+                        break
 
             if not self.bin_items:
                 yield self.env.timeout(0.25)
                 continue
 
-            policy = self.config.policies.wash_batching
-            if len(self.bin_items) < cap:
-                if not policy.allow_partial_load:
-                    while len(self.bin_items) < cap:
-                        if not self._pending:
-                            if self.zones.post_scan_waiting > 0:
-                                yield self.env.timeout(0.5)
-                                break
-                            yield self.env.timeout(0.25)
-                            break
-                        self._pull_pending_into_bin()
-                    if len(self.bin_items) < cap:
-                        continue
-                elif not self._ready_for_partial_batch():
-                    yield self.env.timeout(0.25)
-                    continue
+            if self._can_start_cycle() and self._should_start_now():
+                yield from self._run_cycle()
+                continue
 
-            batch = self.bin_items[:]
-            self.bin_items = []
-            self.in_cycle = True
-            self.batch_size = len(batch)
-            self.cycle_started_at = self.env.now
-            self.log_event(
-                self.env.now,
-                "wash_batch_start",
-                washer=self.washer_id,
-                count=self.batch_size,
-            )
-            self.metrics.record_washer_queue(self.washer_id, self.queue_depth)
+            yield self.env.timeout(0.25)
 
-            yield self.env.timeout(self.wdef.cycle_minutes)
 
-            per_item = self.wdef.cycle_minutes / max(self.batch_size, 1)
-            released: list[int] = []
-            for item_id, done in batch:
-                self.metrics.record_stage(
-                    "wash", 1, "wash", per_item, wait_minutes=0.0, count=1
-                )
-                released.append(item_id)
-                if not done.triggered:
-                    done.succeed()
+def choose_active_filler(
+    lines: list[WasherBinLine],
+    pool: WasherPoolState,
+) -> WasherBinLine | None:
+    """Pick the one drum that may pull from wash backlog (exclusive filler)."""
 
-            self.log_event(
-                self.env.now,
-                "wash_batch_end",
-                washer=self.washer_id,
-                count=self.batch_size,
-            )
+    if any(
+        not ln.in_cycle and ln.bin_fill >= ln.wdef.capacity_items for ln in lines
+    ):
+        return None
 
-            self.in_cycle = False
-            self.batch_size = 0
-            self.metrics.record_washer_queue(self.washer_id, self.queue_depth)
+    idle = [
+        ln
+        for ln in lines
+        if not ln.in_cycle and ln.bin_fill < ln.wdef.capacity_items
+    ]
+    if not idle:
+        return None
+
+    partial = [ln for ln in idle if ln.bin_fill > 0]
+    if partial:
+        return max(partial, key=lambda ln: (ln.bin_fill, ln.wdef.capacity_items))
+
+    ranked = sorted(
+        idle,
+        key=lambda ln: (-ln.wdef.capacity_items, ln.washer_id),
+    )
+    idx = pool.dispatch_index % len(ranked)
+    pool.dispatch_index = (pool.dispatch_index + 1) % len(ranked)
+    return ranked[idx]
 
 
 def pick_fill_first_washer(
     lines: list[WasherBinLine],
     pool: WasherPoolState | None = None,
 ) -> WasherBinLine | None:
-    """Fill the fullest bin that still has space; else round-robin among empty drums."""
+    """Return the exclusive active filler, or the fullest idle line for tests."""
 
     pool = pool or WasherPoolState()
-    eligible = [ln for ln in lines if ln.spare_capacity() > 0]
-    if not eligible:
-        return None
-
-    filling = [ln for ln in eligible if ln.bin_fill > 0]
-    if filling:
-        return max(filling, key=lambda ln: (ln.bin_fill, ln.wdef.capacity_items))
-
-    empty = [ln for ln in eligible if ln.bin_fill == 0 and not ln._pending]
-    if not empty:
-        return min(eligible, key=lambda ln: (ln.bin_fill + len(ln._pending), ln.washer_id))
-
-    ranked = sorted(
-        empty,
-        key=lambda ln: (-ln.wdef.capacity_items, ln.washer_id),
-    )
-    idx = pool.dispatch_index % len(ranked)
-    pool.dispatch_index = (pool.dispatch_index + 1) % len(ranked)
-    return ranked[idx]
+    zones = getattr(lines[0], "zones", None) if lines else None
+    if zones is not None and zones.active_washer_id:
+        active = next(
+            (ln for ln in lines if ln.washer_id == zones.active_washer_id),
+            None,
+        )
+        if active is not None and not active.in_cycle:
+            return active
+    return choose_active_filler(lines, pool)
 
 
 # Backward-compatible alias

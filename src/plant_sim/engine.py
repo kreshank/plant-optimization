@@ -25,7 +25,6 @@ from plant_sim.zones import (
     ScanStation,
     WasherBinLine,
     WorkerStation,
-    pick_fill_first_washer,
     pick_shortest_worker,
 )
 from plant_sim.time_utils import (
@@ -120,6 +119,7 @@ class PlantSimulation:
                 )
         for ln in self._washer_lines:
             ln._sibling_lines = self._washer_lines
+            ln._washer_pool = self.washer_state
 
         self._scan_stations: list[ScanStation] = []
         if self._scan_in_enabled:
@@ -402,6 +402,22 @@ class PlantSimulation:
             return "general_press"
         return "final_qc"
 
+    def _wait_through_wash(self, item_id: int, *, from_node: str):
+        """Join wash backlog; release after primary drum completes a batch."""
+        done = self.env.event()
+        self.zones.wash_release_waiters[item_id] = done
+        self.zones.post_scan_fifo.append(item_id)
+        self.zones.post_scan_waiting += 1
+        self._log_flow(
+            self.env.now, "move", fr=from_node, to="post_scan_waiting", n=1
+        )
+        if self.flow:
+            self.flow.stage_start(item_id, "wash", self.env.now)
+        yield done
+        self._update_washer_busy_flags()
+        if self.flow:
+            self.flow.stage_complete(item_id, "wash", self.env.now)
+
     def _intake_wash_and_separate(self, item_id: int):
         open_min = day_open_minutes(self.config.calendar)
         cutoff = wash_cutoff_minutes(self.config.calendar)
@@ -434,37 +450,23 @@ class PlantSimulation:
                 self.flow.stage_complete(item_id, "scan_in", self.env.now)
             yield from self._transfer_delay("after_scan_in")
             yield from self._transfer_delay("to_wash")
+            yield from self._wait_through_wash(item_id, from_node="scan_in")
         else:
             self.zones.pre_scan_waiting -= 1
-            self.zones.post_scan_waiting += 1
-            self._log_flow(
-                self.env.now, "move", fr="pre_scan_waiting", to="post_scan_waiting", n=1
-            )
             yield from self._transfer_delay("to_wash")
+            yield from self._wait_through_wash(item_id, from_node="pre_scan_waiting")
 
-        line: WasherBinLine | None = None
-        while line is None:
-            line = pick_fill_first_washer(self._washer_lines, self.washer_state)
-            if line is None:
-                yield self.env.timeout(0.1)
-        if self.zones.post_scan_waiting > 0:
-            self.zones.post_scan_waiting -= 1
-        if self.flow:
-            self.flow.stage_start(item_id, "wash", self.env.now)
-        yield line.enqueue_to_bin(item_id)
-        self._update_washer_busy_flags()
-        if self.flow:
-            self.flow.stage_complete(item_id, "wash", self.env.now)
+        washer_id = self.zones.item_washer_line.get(item_id, self._washer_lines[0].washer_id)
         yield from self._transfer_delay("after_wash")
         self._log_flow(
             self.env.now,
             "move",
-            fr=line.washer_id,
+            fr=washer_id,
             to="separation_backlog",
             n=1,
         )
         yield from self._run_worker_station(
-            item_id, "separation", from_node=line.washer_id
+            item_id, "separation", from_node=washer_id
         )
         self._sync_separation_backlog()
 

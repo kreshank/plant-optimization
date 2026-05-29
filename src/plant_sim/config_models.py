@@ -146,6 +146,7 @@ class RoutingConfig(BaseModel):
 class WashBatchingPolicy(BaseModel):
     start_when_full_or_idle: bool = True
     allow_partial_load: bool = True
+    min_fill_ratio: float = Field(default=0.85, ge=0.0, le=1.0)
 
 
 class WashCutoffPolicy(BaseModel):

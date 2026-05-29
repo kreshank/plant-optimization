@@ -68,7 +68,8 @@ policies:
     max_cycles: 2
   wash_batching:
     start_when_full_or_idle: true
-    allow_partial_load: true
+    allow_partial_load: false
+    min_fill_ratio: 1.0
   wash_cutoff:
     defer_to: next_day_open
   outbound_delivery:

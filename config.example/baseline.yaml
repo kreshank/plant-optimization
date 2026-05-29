@@ -65,7 +65,8 @@ wip:
 policies:
   wash_batching:
     start_when_full_or_idle: true
-    allow_partial_load: true
+    allow_partial_load: false
+    min_fill_ratio: 0.85
   wash_cutoff:
     defer_to: next_day_open
   staffing_rules: []
