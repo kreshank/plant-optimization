@@ -1,0 +1,56 @@
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# Caches and coverage
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+hypothesis/
+
+# Local plant configuration and inputs (never commit)
+config/
+data/
+
+# Simulation output
+outputs/
+
+# Secrets and environment
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+
+# IDE / editor / OS
+.idea/
+.vscode/
+.cursor/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+logs/

@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "plant-sim"
+version = "0.1.0"
+description = "Config-driven discrete-event simulation for multi-stage processing plants"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "simpy>=4.1",
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+    "pyyaml>=6.0",
+    "pandas>=2.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "matplotlib>=3.8"]
+optimize = ["optuna>=3.0"]
+
+[project.scripts]
+plant-sim-baseline = "scripts.run_baseline:main"
+plant-sim-compare = "scripts.run_compare:main"
+plant-sim-sweep = "scripts.sweep:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

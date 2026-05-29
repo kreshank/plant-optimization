@@ -1,0 +1,5 @@
+loss_model:
+  coverage: 0.5
+economics:
+  capex: 1000
+  opex_annual: 100

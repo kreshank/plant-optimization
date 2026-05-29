@@ -1,0 +1,102 @@
+calendar:
+  operating_days: [mon]
+  day_open_time: "07:00"
+  wash_cutoff_time: "18:00"
+
+items_per_truck: 10
+
+resources:
+  washers:
+    - id: washer_a
+      cycle_minutes: 10
+      capacity_items: 10
+      count: 1
+
+stages:
+  scan_in:
+    workers: 2
+    service_time_seconds: 6
+    labor_role: scan_in
+  separation:
+    workers: 2
+    service_time_seconds: 4
+    labor_role: separation
+  steam_tunnel:
+    throughput_items_per_hour: 120
+    labor_role: steam
+  jacket_press:
+    workers: 1
+    service_time_seconds: 12
+    labor_role: jacket_press
+  general_press:
+    workers: 2
+    throughput_items_per_hour: 60
+    requires_scan: false
+    labor_role: press
+  final_qc:
+    workers: 2
+    service_time_seconds: 3
+    defect_rate: 0.0
+    labor_role: final_qc
+  spotting:
+    workers: 1
+    service_time_seconds: 20
+    labor_role: spotting
+  delivery_scan:
+    enabled: true
+    workers: 2
+    service_time_seconds: 2
+    labor_role: delivery_scan
+
+scan_seconds_per_item: 0
+
+routing:
+  after_separation:
+    pct_spotting: 0
+    pct_steam_tunnel: 0
+    pct_jacket_press: 0
+    pct_general_press: 100
+  after_steam:
+    pct_needs_press: 0
+
+policies:
+  wash_batching:
+    start_when_full_or_idle: true
+    allow_partial_load: true
+  wash_cutoff:
+    defer_to: next_day_open
+  staffing_rules: []
+  qc_rework:
+    max_cycles: 2
+    on_defect_goto: spotting
+    then: general_press
+  outbound_delivery:
+    mode: end_of_day_cohort
+
+loss_model:
+  base_rate: 0.0
+  coverage: 0.0
+  effectiveness: 0.0
+
+labor:
+  rates_by_role:
+    scan_in: 10
+    separation: 10
+    wash: 10
+    press: 10
+    final_qc: 10
+    delivery_scan: 10
+
+economics:
+  capex: 0
+  opex_annual: 0
+
+inputs:
+  truck_schedule: tests/fixtures/tiny_truck.csv
+
+objectives:
+  delivery_ready_deadline: "06:00"
+  simulation_days: 1
+
+optimization:
+  bounds: {}

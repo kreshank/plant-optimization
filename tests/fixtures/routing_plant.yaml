@@ -1,0 +1,82 @@
+# Exercises all post-separation routes with deterministic split (100% each run via 0 defect)
+calendar:
+  operating_days: [mon]
+  day_open_time: "07:00"
+  wash_cutoff_time: "18:00"
+
+items_per_truck: 4
+
+resources:
+  washers:
+    - id: washer_a
+      cycle_minutes: 5
+      capacity_items: 4
+      count: 1
+
+stages:
+  scan_in:
+    workers: 4
+    service_time_seconds: 1
+  separation:
+    workers: 4
+    service_time_seconds: 1
+  steam_tunnel:
+    throughput_items_per_hour: 3600
+  jacket_press:
+    workers: 2
+    service_time_seconds: 2
+  general_press:
+    workers: 4
+    throughput_items_per_hour: 3600
+    requires_scan: false
+  final_qc:
+    workers: 4
+    service_time_seconds: 1
+    defect_rate: 0.0
+  spotting:
+    workers: 2
+    service_time_seconds: 2
+  delivery_scan:
+    enabled: true
+    workers: 2
+    service_time_seconds: 1
+
+scan_seconds_per_item: 0
+
+routing:
+  after_separation:
+    pct_spotting: 25
+    pct_steam_tunnel: 25
+    pct_jacket_press: 25
+    pct_general_press: 25
+  after_steam:
+    pct_needs_press: 50
+
+policies:
+  staffing_rules: []
+  qc_rework:
+    max_cycles: 1
+  wash_batching:
+    start_when_full_or_idle: true
+    allow_partial_load: true
+  wash_cutoff:
+    defer_to: next_day_open
+  outbound_delivery:
+    mode: end_of_day_cohort
+
+loss_model:
+  base_rate: 0.0
+  coverage: 0.0
+  effectiveness: 0.0
+
+labor:
+  rates_by_role: {}
+
+inputs:
+  truck_schedule: tests/fixtures/tiny_truck.csv
+
+objectives:
+  simulation_days: 1
+
+optimization:
+  bounds: {}
