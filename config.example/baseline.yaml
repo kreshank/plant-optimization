@@ -1,7 +1,8 @@
 calendar:
   operating_days: [mon, tue, wed, thu, fri, sat]
   day_open_time: "07:00"
-  wash_cutoff_time: "18:00"
+  wash_cutoff_time: "17:00"
+  breaks: []
 
 items_per_truck: 1
 
@@ -14,41 +15,32 @@ resources:
 
 stages:
   scan_in:
-    workers:
-      normal: 1
-      reduced: 1
+    enabled: true
+    workers: 1
     service_time_seconds: 1
-    labor_role: scan_in
   separation:
     workers: 1
     service_time_seconds: 1
-    labor_role: separation
   steam_tunnel:
     throughput_items_per_hour: 1
-    labor_role: steam
+    post_check_seconds: 0
   jacket_press:
     workers: 1
     service_time_seconds: 1
-    labor_role: jacket_press
   general_press:
     workers: 1
     throughput_items_per_hour: 1
-    requires_scan: false
-    labor_role: press
   final_qc:
     workers: 1
     service_time_seconds: 1
     defect_rate: 0
-    labor_role: final_qc
   spotting:
     workers: 1
     service_time_seconds: 1
-    labor_role: spotting
   delivery_scan:
     enabled: true
     workers: 1
     service_time_seconds: 1
-    labor_role: delivery_scan
 
 scan_seconds_per_item: 0
 
@@ -61,6 +53,11 @@ routing:
   after_steam:
     pct_needs_press: 0
 
+transfers: {}
+
+wip:
+  initial_by_stage: {}
+
 policies:
   wash_batching:
     start_when_full_or_idle: true
@@ -70,8 +67,6 @@ policies:
   staffing_rules: []
   qc_rework:
     max_cycles: 1
-    on_defect_goto: spotting
-    then: general_press
   outbound_delivery:
     mode: end_of_day_cohort
 
@@ -83,22 +78,11 @@ loss_model:
 labor:
   rates_by_role: {}
 
-economics:
-  capex: 0
-  opex_annual: 0
-  horizon_years: 1
-
 inputs:
   truck_schedule: data/truck_schedule.csv
 
 objectives:
-  delivery_ready_deadline: "06:00"
   simulation_days: 1
 
 optimization:
   bounds: {}
-
-sensitivity:
-  ranges: {}
-
-constraints: {}

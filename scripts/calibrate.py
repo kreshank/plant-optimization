@@ -39,6 +39,12 @@ def main() -> int:
     print(f"  Injected:  {result.summary['items_injected']:,.0f}")
     print(f"  Completed: {result.summary['items_completed']:,}")
     print(f"  Deferred wash events: {result.summary['items_deferred_wash']}")
+    if "daily_items_target" in result.summary:
+        print(f"  Daily target: {result.summary['daily_items_target']:,.0f}")
+        print(f"  Gap vs target: {result.summary.get('daily_items_gap', 0):,.0f}")
+    print("\nTop bottlenecks:")
+    for row in result.summary.get("bottlenecks", [])[:5]:
+        print(f"  {row['stage']}: {row['utilization']:.1%}")
     return 0
 
 

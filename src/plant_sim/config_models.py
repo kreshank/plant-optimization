@@ -9,10 +9,16 @@ import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 
+class CalendarBreak(BaseModel):
+    start: str
+    end: str
+
+
 class CalendarConfig(BaseModel):
     operating_days: list[str]
     day_open_time: str
     wash_cutoff_time: str
+    breaks: list[CalendarBreak] = Field(default_factory=list)
 
 
 class WasherResourceDef(BaseModel):
@@ -43,14 +49,21 @@ class StageWorkers(BaseModel):
         raise ValueError("Stage workers config must define count, normal, or reduced")
 
 
+class StageShift(BaseModel):
+    start: str
+    end: str
+
+
 class StageConfig(BaseModel):
     enabled: bool = True
     workers: StageWorkers | int | None = None
     service_time_seconds: float | None = Field(default=None, gt=0)
     throughput_items_per_hour: float | None = Field(default=None, gt=0)
+    post_check_seconds: float | None = Field(default=None, ge=0)
     requires_scan: bool = False
     defect_rate: float | None = Field(default=None, ge=0, le=1)
     labor_role: str | None = None
+    shift: StageShift | None = None
 
     @field_validator("workers", mode="before")
     @classmethod
@@ -199,9 +212,23 @@ class InputsConfig(BaseModel):
     truck_schedule: str
 
 
+class TransfersConfig(BaseModel):
+    after_wash: float = Field(default=0, ge=0)
+    after_separation: float = Field(default=0, ge=0)
+    after_spotting: float = Field(default=0, ge=0)
+    after_steam_tunnel: float = Field(default=0, ge=0)
+    after_jacket_press: float = Field(default=0, ge=0)
+    after_general_press: float = Field(default=0, ge=0)
+
+
+class WipConfig(BaseModel):
+    initial_by_stage: dict[str, int] = Field(default_factory=dict)
+
+
 class ObjectivesConfig(BaseModel):
     delivery_ready_deadline: str = "06:00"
     simulation_days: int = Field(default=6, ge=1)
+    daily_items_target: float | None = None
 
 
 class OptimizationBounds(BaseModel):
@@ -234,6 +261,8 @@ class PlantConfig(BaseModel):
     stages: StagesConfig
     scan_seconds_per_item: float = Field(default=0, ge=0)
     routing: RoutingConfig
+    transfers: TransfersConfig = Field(default_factory=TransfersConfig)
+    wip: WipConfig = Field(default_factory=WipConfig)
     policies: PoliciesConfig = Field(default_factory=PoliciesConfig)
     loss_model: LossModelConfig
     labor: LaborConfig = Field(default_factory=LaborConfig)

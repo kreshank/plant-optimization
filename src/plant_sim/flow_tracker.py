@@ -36,6 +36,7 @@ class FlowViolation:
 
 @dataclass
 class FlowTracker:
+    scan_in_enabled: bool = True
     violations: list[FlowViolation] = field(default_factory=list)
     _item_completed: dict[int, set[str]] = field(default_factory=dict)
     _item_qc_path: dict[int, str] = field(default_factory=dict)
@@ -57,6 +58,8 @@ class FlowTracker:
 
         if stage == "final_qc":
             preds = self._final_qc_predecessors(item_id)
+        elif stage == "wash" and not self.scan_in_enabled:
+            preds = ()
         elif stage == "spotting" and self._item_in_rework.get(item_id):
             preds = ("final_qc",)
         elif stage == "general_press" and self._item_in_rework.get(item_id):
@@ -65,6 +68,8 @@ class FlowTracker:
             preds = self._general_press_predecessors(item_id, completed)
         else:
             preds = STAGE_PREDECESSORS.get(stage, ())
+            if stage == "wash" and not self.scan_in_enabled:
+                preds = ()
 
         missing = [p for p in preds if p not in completed]
         if missing:
@@ -101,7 +106,11 @@ class FlowTracker:
         return ("separation",)
 
     def _check_aggregate_predecessors(self, stage: str, sim_time: float) -> None:
-        chain = ["scan_in", "wash", "separation"]
+        chain = ["wash", "separation"] if not self.scan_in_enabled else [
+            "scan_in",
+            "wash",
+            "separation",
+        ]
         if stage not in chain:
             return
         idx = chain.index(stage)
