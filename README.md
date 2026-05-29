@@ -121,7 +121,14 @@ Group-based **pipeline** map (horizontally scrollable): **Inbound** → **Wash**
 python scripts/serve_viz.py
 ```
 
-Opens http://127.0.0.1:8765/ — runs the simulator and animates flow. **Snapshot every N min** controls how often queue/washer state is recorded (scrubber); **playback FPS × sim min/frame** controls Play speed only. Use **Full week** for 7 operating days. Sidebar overrides are in-memory only (they do not write YAML).
+Opens http://127.0.0.1:8765/ — runs the simulator and animates flow. Simulation **streams** snapshot batches over SSE so the timeline grows while you scrub or play; config edits **branch** from the current scrub step (approximate checkpoint restore). **Snapshot every N min** controls recording density; **playback speed** is sim minutes per real second. Use **Full week** for 7 operating days. Completed runs are cached in the browser; use **Export recording** for JSON. Sidebar overrides are in-memory only (they do not write YAML).
+
+Smoke checks (local server not required for stream smoke — it starts its own):
+
+```bash
+python scripts/smoke_viz_api.py      # direct graph build
+python scripts/smoke_stream_api.py   # POST /api/sim/start + SSE batches
+```
 
 ---
 

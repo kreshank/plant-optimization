@@ -6,10 +6,40 @@ from dataclasses import dataclass, field
 
 from plant_sim.config_models import PlantConfig
 from plant_sim.time_utils import deadline_minutes, format_minutes
-from plant_sim.unit_tracking import QueueTimeSeries, UnitMetrics, unit_id
+from plant_sim.unit_tracking import (
+    DailyStats,
+    QueueTimeSeries,
+    UnitMetrics,
+    _daily_to_list,
+    unit_id,
+)
 
 MAX_FLOW_EVENTS = 500_000
 MAX_NON_MOVE_FLOW_EVENTS = 20_000
+
+
+def _stage_summary_dict(
+    sm: "StageMetrics",
+    sim_duration_minutes: float,
+    max_queue: float,
+) -> dict:
+    items = sm.items_processed
+    return {
+        "items_processed": items,
+        "total_service_minutes": round(sm.total_service_minutes, 2),
+        "total_wait_minutes": round(sm.total_wait_minutes, 2),
+        "avg_service_seconds": round(
+            (sm.total_service_minutes / items * 60.0) if items else 0.0, 2
+        ),
+        "avg_wait_seconds": round(
+            (sm.total_wait_minutes / items * 60.0) if items else 0.0, 2
+        ),
+        "time_worked_hours": round(sm.total_service_minutes / 60.0, 2),
+        "utilization": round(sm.utilization, 4),
+        "max_queue": round(max_queue, 1),
+        "worker_count": sm.worker_count,
+        "daily": _daily_to_list(sm.daily),
+    }
 
 
 @dataclass
@@ -20,8 +50,21 @@ class StageMetrics:
     total_wait_minutes: float = 0.0
     labor_role: str | None = None
     worker_count: int = 1
+    daily: dict[int, DailyStats] = field(default_factory=dict)
 
     utilization: float = 0.0
+
+    def record_daily(
+        self,
+        operating_day: int,
+        service_minutes: float,
+        wait_minutes: float = 0.0,
+        count: int = 1,
+    ) -> None:
+        d = self.daily.setdefault(operating_day, DailyStats())
+        d.items_processed += count
+        d.total_service_minutes += service_minutes
+        d.total_wait_minutes += wait_minutes
 
     def compute_utilization(self, sim_duration_minutes: float) -> float:
         """Busy fraction = total service time / (workers * horizon)."""
@@ -57,6 +100,7 @@ class MetricsCollector:
     playback_start_minutes: float = 0.0
     playback_horizon_minutes: float = 0.0
     _record_flow_events: bool = False
+    current_operating_day: int = 1
 
     @property
     def sim_duration_minutes(self) -> float:
@@ -85,6 +129,12 @@ class MetricsCollector:
         sm.total_service_minutes += service_minutes
         sm.total_wait_minutes += wait_minutes
         sm.worker_count = workers
+        sm.record_daily(
+            self.current_operating_day,
+            service_minutes,
+            wait_minutes=wait_minutes,
+            count=count,
+        )
         if labor_role:
             self.labor_minutes_by_role[labor_role] = (
                 self.labor_minutes_by_role.get(labor_role, 0.0) + service_minutes
@@ -122,6 +172,10 @@ class MetricsCollector:
         um.items_processed += 1
         um.total_service_minutes += service_minutes
         um.total_wait_minutes += wait_minutes
+        d = um.daily.setdefault(self.current_operating_day, DailyStats())
+        d.items_processed += 1
+        d.total_service_minutes += service_minutes
+        d.total_wait_minutes += wait_minutes
 
     def init_time_series(
         self, interval_minutes: float, *, record_flow_events: bool = True
@@ -244,11 +298,11 @@ class MetricsCollector:
                 for s, u in self.bottleneck_ranking()[:10]
             ],
             "stages": {
-                sid: {
-                    "items_processed": sm.items_processed,
-                    "utilization": round(sm.utilization, 4),
-                    "max_queue": self.max_queue_by_stage.get(sid, 0),
-                }
+                sid: _stage_summary_dict(
+                    sm,
+                    self._sim_duration_minutes,
+                    self.max_queue_by_stage.get(sid, 0.0),
+                )
                 for sid, sm in self.stage_metrics.items()
             },
             "labor_minutes_by_role": {

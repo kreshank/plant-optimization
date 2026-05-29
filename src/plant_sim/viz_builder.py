@@ -7,6 +7,7 @@ from typing import Any
 
 from plant_sim.config_models import PlantConfig
 from plant_sim.engine import SimulationResult
+from plant_sim.block_statistics import build_block_statistics
 from plant_sim.group_layout import build_group_layout
 
 
@@ -116,6 +117,7 @@ def build_flow_graph(
         summary["flow_events_truncated"] = True
     summary["flow_events_dropped"] = result.metrics.flow_events_dropped
 
+    cal = config.calendar
     return {
         "groups": layout["groups"],
         "group_links": layout["group_links"],
@@ -124,6 +126,8 @@ def build_flow_graph(
         "time_series": ts_payload,
         "flow_events": events,
         "summary": summary,
+        "effective_config": config_to_jsonable(config),
+        "block_statistics": build_block_statistics(config, result),
         "config_snapshot": {
             "items_per_truck": config.items_per_truck,
             "daily_target": config.objectives.daily_items_target,
@@ -147,6 +151,8 @@ def build_flow_graph(
             },
             "transfers": config.transfers.model_dump(),
             "model_assumptions": _model_assumptions(config),
+            "wash_intake_cutoff": cal.wash_intake_cutoff_time,
+            "plant_close": cal.wash_cutoff_time,
         },
     }
 
@@ -165,6 +171,14 @@ def _model_assumptions(config: PlantConfig) -> list[str]:
         lines.append("Scan-in bypassed: truck → pre-scan / wash backlog directly.")
     mode = config.policies.outbound_delivery.mode
     lines.append(f"Outbound dispatch: {mode} (see completed-waiting / shipped KPIs).")
+    cal = config.calendar
+    lines.append(
+        f"Wash intake until {cal.wash_intake_cutoff_time}; plant day ends "
+        f"{cal.wash_cutoff_time} (snapshots/playback/EOD)."
+    )
+    lines.append(
+        "17:00–close: press/steam/spot off shift; separation + QC + scan until close."
+    )
     return lines
 
 

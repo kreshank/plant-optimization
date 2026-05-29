@@ -13,6 +13,15 @@ def unit_id(stage: str, index: int) -> str:
     return f"{stage}:{index}"
 
 
+@dataclass
+class DailyStats:
+    """Per operating-day totals for a worker unit or stage."""
+
+    items_processed: int = 0
+    total_service_minutes: float = 0.0
+    total_wait_minutes: float = 0.0
+
+
 def parse_unit_id(uid: str) -> tuple[str, int] | None:
     if ":" not in uid:
         return None
@@ -34,6 +43,7 @@ class UnitMetrics:
     max_queue: float = 0.0
     queue_sum: float = 0.0
     queue_samples: int = 0
+    daily: dict[int, DailyStats] = field(default_factory=dict)
 
     @property
     def avg_queue(self) -> float:
@@ -46,6 +56,16 @@ class UnitMetrics:
             return 0.0
         return min(1.0, self.total_service_minutes / sim_duration_minutes)
 
+    def avg_service_seconds(self) -> float:
+        if self.items_processed <= 0:
+            return 0.0
+        return (self.total_service_minutes / self.items_processed) * 60.0
+
+    def avg_wait_seconds(self) -> float:
+        if self.items_processed <= 0:
+            return 0.0
+        return (self.total_wait_minutes / self.items_processed) * 60.0
+
     def to_dict(self, sim_duration_minutes: float) -> dict[str, Any]:
         return {
             "unit_id": self.unit_id,
@@ -53,11 +73,36 @@ class UnitMetrics:
             "index": self.index,
             "label": unit_label(self.stage_id, self.index),
             "items_processed": self.items_processed,
+            "total_service_minutes": round(self.total_service_minutes, 2),
+            "total_wait_minutes": round(self.total_wait_minutes, 2),
+            "avg_service_seconds": round(self.avg_service_seconds(), 2),
+            "avg_wait_seconds": round(self.avg_wait_seconds(), 2),
+            "time_worked_hours": round(self.total_service_minutes / 60.0, 2),
             "utilization": round(self.utilization(sim_duration_minutes), 4),
             "max_queue": round(self.max_queue, 1),
             "avg_queue": round(self.avg_queue, 2),
-            "total_wait_minutes": round(self.total_wait_minutes, 1),
+            "daily": _daily_to_list(self.daily),
         }
+
+
+def _daily_to_list(daily: dict[int, DailyStats]) -> list[dict[str, Any]]:
+    rows = []
+    for day in sorted(daily.keys()):
+        d = daily[day]
+        items = d.items_processed
+        rows.append(
+            {
+                "operating_day": day,
+                "items_processed": items,
+                "service_minutes": round(d.total_service_minutes, 2),
+                "wait_minutes": round(d.total_wait_minutes, 2),
+                "avg_service_seconds": round(
+                    (d.total_service_minutes / items * 60.0) if items else 0.0, 2
+                ),
+                "time_worked_hours": round(d.total_service_minutes / 60.0, 2),
+            }
+        )
+    return rows
 
 
 def unit_label(stage_id: str, index: int) -> str:

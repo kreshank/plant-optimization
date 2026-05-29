@@ -26,10 +26,8 @@
         <label>Operating days
           <input type="number" id="inp-sim-days" min="1" max="14" step="1" value="1" />
         </label>
-        <label>Snapshot interval (sim minutes)
-          <input type="number" id="inp-sample-interval" min="1" max="60" step="1" value="1" title="Record plant state every N sim minutes" />
-        </label>
-        <p class="hint">Smaller = smoother queues &amp; washers; larger = faster re-run.</p>
+        <span id="snapshot-interval-wrap"></span>
+        <p class="hint">Smaller interval = smoother playback; larger = faster re-run.</p>
         <div id="sim-progress-wrap" class="sim-progress-wrap hidden">
           <progress id="sim-progress" max="100" value="0"></progress>
           <div id="sim-progress-label" class="sim-progress-label">—</div>
@@ -39,21 +37,33 @@
         </label>
         <p class="hint"><strong>1×</strong> ≈ one sim minute per real second (with 1 min snapshots). <strong>60×</strong> ≈ one sim hour per second.</p>
       </section>
-      <section>
-        <h2>Quick overrides</h2>
-        <p class="hint">In memory only — does not write YAML.</p>
-        <label>Items per truck
-          <input type="number" id="inp-items-per-truck" step="0.01" />
-        </label>
-        <label>Routing: spotting %
-          <input type="number" id="inp-pct-spot" min="0" max="100" step="0.5" />
-        </label>
-        <label>Routing: steam %
-          <input type="number" id="inp-pct-steam" min="0" max="100" step="0.5" />
-        </label>
-        <label>General press throughput / hr
-          <input type="number" id="inp-press-rate" min="1" step="0.5" />
-        </label>
+      <section id="config-section">
+        <h2>Plant config</h2>
+        <p class="hint">Edits re-simulate from the scrub position after a short pause. Branch restore is approximate. Scenarios are saved in this browser only.</p>
+        <button type="button" id="btn-reset-config" class="legend-btn">Reset to baseline</button>
+        <details class="config-presets" id="config-presets-panel">
+          <summary>Saved scenarios</summary>
+          <p class="hint">Name and save the current config to compare or reload later.</p>
+          <div class="config-preset-toolbar">
+            <input type="text" id="inp-preset-name" placeholder="Scenario name" maxlength="80" />
+            <button type="button" id="btn-save-preset" class="legend-btn">Save</button>
+          </div>
+          <div class="config-preset-io">
+            <button type="button" id="btn-export-presets" class="legend-btn">Export all</button>
+            <label class="config-preset-import-label">
+              Import
+              <input type="file" id="inp-import-presets" accept="application/json,.json" hidden />
+            </label>
+          </div>
+          <ul id="config-preset-list" class="config-preset-list"></ul>
+        </details>
+        <p id="config-run-hint" class="hint"></p>
+        <div id="config-editor" class="config-editor"></div>
+        <details class="config-advanced">
+          <summary>Advanced JSON</summary>
+          <textarea id="inp-config-json" rows="8" spellcheck="false"></textarea>
+          <button type="button" id="btn-apply-json" class="legend-btn">Apply JSON</button>
+        </details>
       </section>
       <section>
         <h2>Timeline</h2>
@@ -62,11 +72,12 @@
         <div class="timeline-btns">
           <button id="btn-play" type="button" disabled>Play</button>
           <button id="btn-live" type="button" disabled>Live (end)</button>
+          <button id="btn-export-recording" type="button" class="legend-btn" disabled>Export recording</button>
         </div>
       </section>
       <section id="unit-panel" class="hidden">
-        <h2>Selected worker</h2>
-        <div id="unit-detail">Click a washer, presser, or spotter.</div>
+        <h2>Selected station</h2>
+        <div id="unit-detail">Click a block for throughput and timing stats.</div>
       </section>
       <section>
         <h2>Outbound</h2>
@@ -92,6 +103,10 @@
       </div>
     </div>
   </main>
+  <script src="duration-fields.js"></script>
+  <script src="config-editor.js"></script>
+  <script src="config-presets.js"></script>
+  <script src="sim-recording.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

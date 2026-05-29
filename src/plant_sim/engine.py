@@ -36,6 +36,7 @@ from plant_sim.time_utils import (
     parse_time_of_day,
     time_to_minutes,
     wash_cutoff_minutes,
+    wash_intake_cutoff_minutes,
     delay_for_shift,
     is_operating_day,
     minutes_until_break_ends,
@@ -43,6 +44,10 @@ from plant_sim.time_utils import (
 )
 
 DAY_NAMES = [k for k, v in sorted(WEEKDAY_MAP.items(), key=lambda x: x[1])]
+
+
+class SimulationCancelled(Exception):
+    """Raised when a streaming run is cancelled cooperatively."""
 
 WORKER_STAGES = (
     "steam_tunnel",
@@ -181,6 +186,17 @@ class PlantSimulation:
         for wave in self.truck_waves:
             self._schedule_by_weekday.setdefault(wave.day_of_week, []).append(wave)
 
+        self._stream_recorder = None
+        self._cancel_check: Callable[[], bool] | None = None
+        self._cancel_requested = False
+        self._run_calendar_day = 0
+        self._run_weekday = 0
+        self._run_operating_count = 0
+        self._run_wip_seeded = False
+        self._run_first_op_day: int | None = None
+        self._run_last_op_day: int | None = None
+        self._resume_from_checkpoint = False
+
     def _init_stage_resources(self) -> None:
         stages = self.config.stages
         for name in WORKER_STAGES:
@@ -189,6 +205,25 @@ class PlantSimulation:
                 continue
             cap = max(stage.worker_count(), 1)
             self._stage_resources[name] = simpy.Resource(self.env, capacity=cap)
+
+    def attach_stream_recorder(
+        self, recorder, *, cancel_check: Callable[[], bool] | None = None
+    ) -> None:
+        self._stream_recorder = recorder
+        self._cancel_check = cancel_check
+        self._cancel_requested = False
+        if recorder is not None:
+            recorder.bind_metrics(self.metrics)
+
+    def request_cancel(self) -> None:
+        self._cancel_requested = True
+
+    def _should_cancel(self) -> bool:
+        if self._cancel_requested:
+            return True
+        if self._cancel_check is not None and self._cancel_check():
+            return True
+        return False
 
     def _log_flow(self, sim_minutes: float, kind: str, **fields) -> None:
         self.metrics.log_flow_event(sim_minutes, kind, **fields)
@@ -389,9 +424,10 @@ class PlantSimulation:
                 continue
             if within > wash_cutoff_minutes(cal):
                 continue
-            self.metrics.append_time_series_sample(
-                self.env.now, self._capture_queue_snapshot()
-            )
+            snap = self._capture_queue_snapshot()
+            self.metrics.append_time_series_sample(self.env.now, snap)
+            if self._stream_recorder is not None:
+                self._stream_recorder.record_sample(self.env.now, snap)
 
     def _yield_calendar_wait(self, stage_name: str):
         while True:
@@ -507,12 +543,12 @@ class PlantSimulation:
 
     def _intake_wash_and_separate(self, item_id: int):
         open_min = day_open_minutes(self.config.calendar)
-        cutoff = wash_cutoff_minutes(self.config.calendar)
+        intake_cutoff = wash_intake_cutoff_minutes(self.config.calendar)
         _, within = divmod(self.env.now, 24 * 60)
-        if within >= cutoff or within < open_min:
+        if within >= intake_cutoff or within < open_min:
             self.metrics.items_deferred_wash += 1
             day_base = int(self.env.now // (24 * 60))
-            if within >= cutoff:
+            if within >= intake_cutoff:
                 wait_until = (day_base + 1) * 24 * 60 + open_min
             else:
                 wait_until = day_base * 24 * 60 + open_min
@@ -739,7 +775,24 @@ class PlantSimulation:
         if self.sample_interval_minutes and self.sample_interval_minutes > 0:
             self.env.process(self._queue_sampler())
 
+        if self._resume_from_checkpoint:
+            calendar_day = self._run_calendar_day
+            weekday = self._run_weekday
+            operating_count = self._run_operating_count
+            wip_seeded = self._run_wip_seeded
+            first_op_calendar_day = self._run_first_op_day
+            last_op_calendar_day = self._run_last_op_day
+            self._resume_from_checkpoint = False
+
         while operating_count < days_to_sim:
+            self._run_calendar_day = calendar_day
+            self._run_weekday = weekday
+            self._run_operating_count = operating_count
+            self._run_wip_seeded = wip_seeded
+            self._run_first_op_day = first_op_calendar_day
+            self._run_last_op_day = last_op_calendar_day
+            if self._should_cancel():
+                raise SimulationCancelled("cancelled between operating days")
             if is_operating_day(weekday, cal):
                 if first_op_calendar_day is None:
                     first_op_calendar_day = calendar_day
@@ -754,6 +807,7 @@ class PlantSimulation:
                     self._end_of_day_outbound(calendar_day, operating_count + 1)
                 )
                 operating_count += 1
+                self.metrics.current_operating_day = operating_count
                 self._report_progress(
                     progress_callback,
                     "simulate",
@@ -766,10 +820,13 @@ class PlantSimulation:
             end = calendar_day * 24 * 60
             if end > self.env.now:
                 self.env.run(until=end)
+                if self._should_cancel():
+                    raise SimulationCancelled("cancelled during calendar advance")
             weekday = (weekday + 1) % 7
 
         if self.env.now < calendar_day * 24 * 60:
-            self.env.run(until=calendar_day * 24 * 60)
+            if not self._should_cancel():
+                self.env.run(until=calendar_day * 24 * 60)
 
         if first_op_calendar_day is not None and last_op_calendar_day is not None:
             pb_start, pb_end = operating_window_bounds(
@@ -786,7 +843,8 @@ class PlantSimulation:
             progress_callback, "drain", 0, 1, "Draining WIP…"
         )
         drain_until = self.env.now + 24 * 60 * drain_days
-        self.env.run(until=drain_until)
+        if not self._should_cancel():
+            self.env.run(until=drain_until)
         self._report_progress(
             progress_callback, "drain", 1, 1, "Drain complete"
         )

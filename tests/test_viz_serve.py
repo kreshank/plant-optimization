@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import json
-import time
 import threading
-import urllib.parse
+import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
+
+from tests.stream_helpers import start_sim_job
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -41,23 +42,9 @@ def test_health(viz_server: str) -> None:
 
 
 def _poll_sim_job(base_url: str, job_id: str, *, timeout_sec: float = 180) -> dict:
-  deadline = time.time() + timeout_sec
-  status_url = (
-    f"{base_url}/api/simulate/status?"
-    + urllib.parse.urlencode({"job_id": job_id})
-  )
-  while time.time() < deadline:
-    with urllib.request.urlopen(status_url, timeout=10) as resp:
-      snap = json.loads(resp.read())
-    if snap.get("status") == "done":
-      result = snap.get("result")
-      if result is None:
-        raise AssertionError("job done but missing result")
-      return result
-    if snap.get("status") == "error":
-      raise AssertionError(snap.get("error", "simulation failed"))
-    time.sleep(0.15)
-  raise TimeoutError(f"job {job_id} did not finish in {timeout_sec}s")
+  from tests.stream_helpers import poll_sim_job
+
+  return poll_sim_job(base_url, job_id, timeout_sec=timeout_sec)
 
 
 def test_post_simulate_contract(viz_server: str) -> None:
@@ -96,6 +83,71 @@ def test_post_simulate_contract(viz_server: str) -> None:
   link_pairs = {(lnk["from"], lnk["to"]) for lnk in data.get("group_links", [])}
   assert ("delivery_scan", "outbound_scan") in link_pairs
   assert ("outbound_scan", "outbound") in link_pairs
+  for key in (
+    "groups",
+    "group_links",
+    "time_series",
+    "flow_events",
+    "summary",
+    "effective_config",
+    "config_snapshot",
+    "block_statistics",
+  ):
+    assert key in data, f"missing graph key {key}"
+
+
+def test_sim_start_and_cancel(viz_server: str) -> None:
+  with urllib.request.urlopen(f"{viz_server}/api/config", timeout=5) as resp:
+    cfg = json.loads(resp.read())
+  cfg["objectives"]["simulation_days"] = 1
+  job_id = start_sim_job(
+    viz_server,
+    seed=1,
+    sample_interval_minutes=30,
+    config=cfg,
+    batch_size=10,
+  )
+  cancel_body = json.dumps({"job_id": job_id}).encode()
+  cancel_req = urllib.request.Request(
+    f"{viz_server}/api/sim/cancel",
+    data=cancel_body,
+    headers={"Content-Type": "application/json"},
+    method="POST",
+  )
+  with urllib.request.urlopen(cancel_req, timeout=5) as resp:
+    assert json.loads(resp.read()).get("ok") is True
+
+
+def test_branch_rejects_missing_checkpoint(viz_server: str) -> None:
+  with urllib.request.urlopen(f"{viz_server}/api/config", timeout=5) as resp:
+    cfg = json.loads(resp.read())
+  cfg["objectives"]["simulation_days"] = 1
+  job_id = start_sim_job(
+    viz_server,
+    seed=2,
+    sample_interval_minutes=30,
+    config=cfg,
+  )
+  body = json.dumps(
+    {"job_id": job_id, "fork_index": 9999, "config": cfg}
+  ).encode()
+  req = urllib.request.Request(
+    f"{viz_server}/api/sim/branch",
+    data=body,
+    headers={"Content-Type": "application/json"},
+    method="POST",
+  )
+  with pytest.raises(urllib.error.HTTPError) as exc:
+    urllib.request.urlopen(req, timeout=5)
+  assert exc.value.code == 400
+  cancel_req = urllib.request.Request(
+    f"{viz_server}/api/sim/cancel",
+    data=json.dumps({"job_id": job_id}).encode(),
+    headers={"Content-Type": "application/json"},
+    method="POST",
+  )
+  with urllib.request.urlopen(cancel_req, timeout=5):
+    pass
 
 
 def test_index_html(viz_server: str) -> None:
@@ -103,3 +155,6 @@ def test_index_html(viz_server: str) -> None:
     html = resp.read().decode()
   assert "flow-canvas" in html
   assert "app.js" in html
+  assert "sim-recording.js" in html
+  assert "btn-export-recording" in html
+  assert "Branch restore is approximate" in html

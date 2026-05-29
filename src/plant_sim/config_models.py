@@ -17,6 +17,9 @@ class CalendarBreak(BaseModel):
 class CalendarConfig(BaseModel):
     operating_days: list[str]
     day_open_time: str
+    """Last time new garments may enter the wash pipeline (defer until next open)."""
+    wash_intake_cutoff_time: str = "17:00"
+    """Plant day close: snapshots, playback, and default outbound dispatch."""
     wash_cutoff_time: str
     breaks: list[CalendarBreak] = Field(default_factory=list)
 

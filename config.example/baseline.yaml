@@ -1,7 +1,8 @@
 calendar:
   operating_days: [mon, tue, wed, thu, fri, sat]
   day_open_time: "07:00"
-  wash_cutoff_time: "17:00"
+  wash_intake_cutoff_time: "17:00"
+  wash_cutoff_time: "19:00"
   breaks: []
 
 items_per_truck: 1

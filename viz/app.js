@@ -29,6 +29,7 @@ let state = {
   flow_events: [],
   time_series: null,
   summary: {},
+  block_statistics: {},
 };
 let blockMap = new Map();
 let groupMap = new Map();
@@ -44,10 +45,19 @@ let playbackSampleIndex = 0;
 let lastFrame = performance.now();
 let eventCursor = 0;
 let playbackStepDebt = 0;
+let streamRecording = null;
+let streamEventSource = null;
+let currentStreamJobId = null;
+let configBranchTimer = null;
 const MAX_PARTICLES = 400;
 const MIN_BLOCK_W = 88;
 const MIN_BLOCK_H = 48;
 const LAYOUT_STORE_KEY = "plantFlowGroupOffsets";
+const SIM_MEMO_INDEX_KEY = "viz_sim_memo_index";
+const SIM_MEMO_PREFIX = "viz_sim_memo_";
+const MAX_SIM_MEMO_ENTRIES = 6;
+const BRANCH_FIDELITY_NOTE =
+  "Branch restore replays aggregate queue/washer state; individual item timing after a fork is approximate.";
 const view = { x: 0, y: 0, scale: 1 };
 let pointer = null;
 
@@ -437,11 +447,21 @@ function operatingDaysSimulated() {
   return state.config_snapshot?.simulation_days ?? 1;
 }
 
+function validPlaybackMaxIndex() {
+  if (streamRecording) {
+    const v = streamRecording.validMaxIndex();
+    if (v >= 0) return v;
+  }
+  const s = samples();
+  return s.length ? s.length - 1 : 0;
+}
+
 function currentSampleIndex() {
   const s = samples();
   if (!s.length) return 0;
+  const maxI = validPlaybackMaxIndex();
   const idx = playing ? playbackSampleIndex : timelineIndex;
-  return Math.min(Math.max(0, idx), s.length - 1);
+  return Math.min(Math.max(0, idx), maxI);
 }
 
 function activeSample() {
@@ -467,8 +487,7 @@ function syncClockDisplays() {
 function snapshotIntervalMinutes() {
   const fromSeries = state.time_series?.interval_minutes;
   if (fromSeries != null && fromSeries > 0) return fromSeries;
-  const fromInput = parseFloat(document.getElementById("inp-sample-interval").value);
-  return fromInput > 0 ? fromInput : 1;
+  return getSnapshotIntervalMinutes();
 }
 
 function readPlaybackSettings() {
@@ -526,12 +545,14 @@ function formatTimelineTitle() {
 
 function setupTimeline() {
   const s = samples();
+  const maxIdx = Math.max(0, validPlaybackMaxIndex());
   timelineEl.disabled = s.length < 2;
   const hasData = s.length >= 1;
   document.getElementById("btn-play").disabled = !hasData;
   document.getElementById("btn-live").disabled = s.length < 2;
+  const exportBtn = document.getElementById("btn-export-recording");
+  if (exportBtn) exportBtn.disabled = !hasData;
   if (s.length) {
-    const maxIdx = s.length - 1;
     timelineEl.min = "0";
     timelineEl.max = String(maxIdx);
     timelineEl.step = "1";
@@ -1025,13 +1046,21 @@ function loop(now) {
         playbackStepDebt -= 1;
         const prevIdx = playbackSampleIndex;
         const prevT = s[prevIdx]?.t ?? 0;
-        playbackSampleIndex = Math.min(playbackSampleIndex + 1, s.length - 1);
-        timelineIndex = playbackSampleIndex;
-        timelineEl.value = String(playbackSampleIndex);
-        const nextT = s[playbackSampleIndex]?.t ?? prevT;
-        spawnParticlesForInterval(prevT, nextT);
-        syncEventCursorToTime(nextT);
-        if (playbackSampleIndex >= s.length - 1) {
+        const maxI = validPlaybackMaxIndex();
+        if (playbackSampleIndex >= maxI) {
+          playbackStepDebt = 0;
+          if (streamRecording && streamEventSource && maxI < s.length - 1) {
+            statusEl.textContent = `Buffering… step ${maxI + 1}`;
+          }
+        } else {
+          playbackSampleIndex = Math.min(playbackSampleIndex + 1, maxI);
+          timelineIndex = playbackSampleIndex;
+          timelineEl.value = String(playbackSampleIndex);
+          const nextT = s[playbackSampleIndex]?.t ?? prevT;
+          spawnParticlesForInterval(prevT, nextT);
+          syncEventCursorToTime(nextT);
+        }
+        if (playbackSampleIndex >= maxI && maxI >= s.length - 1) {
           playing = false;
           document.getElementById("btn-play").textContent = "Play";
         }
@@ -1044,21 +1073,127 @@ function loop(now) {
   requestAnimationFrame(loop);
 }
 
+function blockStatsFor(bid, b) {
+  const bs = state.block_statistics || {};
+  if (bs[bid]) return bs[bid];
+  if (b?.stage && bs[b.stage]) return bs[b.stage];
+  if (b?.fifo_pool && bs[b.fifo_pool]) return bs[b.fifo_pool];
+  return null;
+}
+
+function initSnapshotIntervalControl() {
+  const mount = document.getElementById("snapshot-interval-wrap");
+  if (!mount || !window.DurationFields) return;
+  let stored = 1;
+  try {
+    const saved = localStorage.getItem("viz_sample_interval_min");
+    if (saved) stored = parseFloat(saved) || 1;
+  } catch {
+    /* ignore */
+  }
+  mount.innerHTML = window.DurationFields.rowHtml(
+    "Snapshot interval",
+    null,
+    stored,
+    "minutes",
+    { simControl: "snapshot_interval" }
+  );
+  const field = mount.querySelector(".duration-field");
+  if (!field) return;
+  field.dataset.storedMinutes = String(stored);
+  window.DurationFields.bind(field, {
+    onChange: (w) => {
+      const m = window.DurationFields.readWrapper(w);
+      w.dataset.storedMinutes = String(m);
+      try {
+        localStorage.setItem("viz_sample_interval_min", String(m));
+      } catch {
+        /* ignore */
+      }
+    },
+  });
+}
+
+function getSnapshotIntervalMinutes() {
+  const wrap = document.querySelector('[data-sim-control="snapshot_interval"]');
+  if (wrap && window.DurationFields) {
+    return Math.max(0.1, window.DurationFields.readWrapper(wrap));
+  }
+  return 1;
+}
+
+function formatDurationSeconds(sec) {
+  if (sec == null || !Number.isFinite(sec)) return "—";
+  const s = Number(sec);
+  if (s >= 90) return `${s.toFixed(1)}s (${(s / 60).toFixed(2)} min)`;
+  return `${s.toFixed(1)}s`;
+}
+
+function formatWorkedHours(d) {
+  if (d.time_worked_hours != null) return `${d.time_worked_hours}h`;
+  if (d.service_minutes != null) return `${(d.service_minutes / 60).toFixed(2)}h`;
+  return "—";
+}
+
+function renderDailyTable(daily) {
+  if (!daily?.length) {
+    return "<p class=\"hint\">No per-day breakdown (re-run sim with operating days &gt; 1).</p>";
+  }
+  const rows = daily
+    .map(
+      (d) =>
+        `<tr><td>Day ${d.operating_day}</td><td>${d.items_processed}</td>` +
+        `<td>${d.avg_service_seconds ?? "—"}s</td>` +
+        `<td>${formatWorkedHours(d)}</td>` +
+        `<td>${d.wait_minutes != null ? Math.round(d.wait_minutes) + "m wait" : "—"}</td></tr>`
+    )
+    .join("");
+  return `<table class="block-stats-table"><thead><tr><th>Day</th><th>Items</th><th>Avg proc</th><th>Worked</th><th>Wait</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+function renderBlockStatsPanel(b, st) {
+  if (!st) {
+    return `<div>Group: <strong>${b._groupId}</strong></div>
+      <div>~Daily (avg): <strong>${b.daily_items ?? "—"}</strong></div>
+      <p class="hint">No detailed stats for this block.</p>`;
+  }
+  const utilPct = st.utilization != null ? (st.utilization * 100).toFixed(1) + "%" : "—";
+  const shiftCap =
+    st.shift_capacity_hours != null
+      ? `${st.shift_capacity_hours}h shift capacity (${simDaysLabel()} days)`
+      : "";
+  return `
+    <div class="block-stats-summary">
+      <div>Items processed: <strong>${st.items_processed ?? 0}</strong></div>
+      <div>Avg process time: <strong>${formatDurationSeconds(st.avg_service_seconds)}</strong> / item</div>
+      <div>Avg wait (queue): <strong>${formatDurationSeconds(st.avg_wait_seconds)}</strong> / item</div>
+      <div>Time worked (service): <strong>${st.time_worked_hours ?? "—"}h</strong></div>
+      <div>Utilization: <strong>${utilPct}</strong>${shiftCap ? ` · ${shiftCap}` : ""}</div>
+      ${st.max_queue != null ? `<div>Peak queue: <strong>${st.max_queue}</strong></div>` : ""}
+    </div>
+    <div class="block-stats-daily"><strong>By operating day</strong>${renderDailyTable(st.daily)}</div>`;
+}
+
+function simDaysLabel() {
+  return state.config_snapshot?.simulation_days ?? state.summary?.simulation_days ?? "?";
+}
+
 function showBlockDetail(bid) {
   selectedBlockId = bid;
   const b = blockMap.get(bid);
   if (!b) return;
   unitPanel.classList.remove("hidden");
+  const st = blockStatsFor(bid, b);
   if (b.kind === "washer") {
     const ws = washerState(bid);
     const cap = b.capacity_items || ws.bin_capacity || 100;
     unitDetailEl.innerHTML = `<div><strong>${b.label}</strong></div>
-      <div>Bin: <strong>${ws.bin_fill ?? 0}</strong> / ${cap} (reserve on wash backlog)</div>
-      <div>Drum: <strong>${ws.in_cycle ? ws.batch_size + " items" : "empty"}</strong>${ws.in_cycle ? " · " + Math.round((ws.cycle_progress || 0) * 100) + "% cycle" : ""}</div>`;
+      <div>Bin: <strong>${ws.bin_fill ?? 0}</strong> / ${cap} (live snapshot)</div>
+      <div>Drum: <strong>${ws.in_cycle ? ws.batch_size + " items" : "empty"}</strong>${ws.in_cycle ? " · " + Math.round((ws.cycle_progress || 0) * 100) + "% cycle" : ""}</div>
+      ${renderBlockStatsPanel(b, st)}`;
   } else {
     unitDetailEl.innerHTML = `<div><strong>${b.label}</strong></div>
-      <div>Group: <strong>${b._groupId}</strong></div>
-      <div>~Daily: <strong>${b.daily_items ?? "—"}</strong></div>`;
+      ${renderBlockStatsPanel(b, st)}`;
   }
 }
 
@@ -1109,12 +1244,29 @@ function fillSidebar(data) {
     ? bn.slice(0, 6).map((b) => `${b.stage}: ${(b.utilization * 100).toFixed(0)}%`).join("<br>")
     : "—";
   updateFlowEventsWarning();
-  if (c.items_per_truck != null) document.getElementById("inp-items-per-truck").value = c.items_per_truck;
   if (c.simulation_days != null) document.getElementById("inp-sim-days").value = c.simulation_days;
-  if (c.sample_interval_minutes != null) document.getElementById("inp-sample-interval").value = c.sample_interval_minutes;
-  if (c.routing) {
-    document.getElementById("inp-pct-spot").value = c.routing.spotting;
-    document.getElementById("inp-pct-steam").value = c.routing.steam;
+  if (c.sample_interval_minutes != null) {
+    const wrap = document.querySelector('[data-sim-control="snapshot_interval"]');
+    if (wrap && window.DurationFields) {
+      wrap.dataset.storedMinutes = String(c.sample_interval_minutes);
+      const unit = window.DurationFields.defaultUnit("minutes", c.sample_interval_minutes);
+      const unitSel = wrap.querySelector(".duration-unit");
+      if (unitSel) unitSel.value = unit;
+      const input = wrap.querySelector(".duration-value");
+      if (input) {
+        input.value = window.DurationFields.formatDisplayNum(
+          window.DurationFields.toDisplay(c.sample_interval_minutes, "minutes", unit),
+          "minutes",
+          unit
+        );
+      }
+    }
+  }
+  const eff = data.effective_config;
+  if (eff && window.PlantConfigEditor?.applyEffectiveConfigAfterRun) {
+    window.PlantConfigEditor.applyEffectiveConfigAfterRun(eff, c);
+  } else if (c.plant_close && window.PlantConfigEditor?.updateRunHint) {
+    window.PlantConfigEditor.updateRunHint(eff || {}, c);
   }
 }
 
@@ -1164,7 +1316,7 @@ async function pollSimJob(jobId) {
   }
 }
 
-function applySimulationResult(data) {
+function applySimulationResult(data, memoOpts = {}) {
   state = data;
   particles = [];
   eventCursor = 0;
@@ -1182,6 +1334,272 @@ function applySimulationResult(data) {
   fillSidebar(data);
   setupTimeline();
   draw();
+  if (memoOpts.fromCache) return;
+  const cfg = memoOpts.config || getSimConfig();
+  if (!cfg) return;
+  const forkIndex = memoOpts.forkIndex ?? -1;
+  saveSimMemo(
+    computeSimMemoKey(
+      cfg,
+      memoOpts.seed ?? 42,
+      getSnapshotIntervalMinutes(),
+      forkIndex
+    ),
+    data,
+    { forkIndex }
+  );
+}
+
+function stableStringify(value) {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
+  const keys = Object.keys(value).sort();
+  return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStringify(value[k])}`).join(",")}}`;
+}
+
+function hashString(text) {
+  let h = 5381;
+  for (let i = 0; i < text.length; i++) {
+    h = ((h << 5) + h) ^ text.charCodeAt(i);
+  }
+  return (h >>> 0).toString(16);
+}
+
+function computeSimMemoKey(config, seed, intervalMinutes, forkIndex) {
+  return hashString(
+    stableStringify({ config, seed, intervalMinutes, forkIndex: forkIndex ?? -1 })
+  );
+}
+
+function loadSimMemoIndex() {
+  try {
+    return JSON.parse(localStorage.getItem(SIM_MEMO_INDEX_KEY) || "[]");
+  } catch {
+    return [];
+  }
+}
+
+function saveSimMemoIndex(index) {
+  localStorage.setItem(SIM_MEMO_INDEX_KEY, JSON.stringify(index.slice(0, MAX_SIM_MEMO_ENTRIES)));
+}
+
+function loadSimMemo(key) {
+  try {
+    const raw = localStorage.getItem(`${SIM_MEMO_PREFIX}${key}`);
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+function saveSimMemo(key, graph, meta = {}) {
+  try {
+    const payload = {
+      savedAt: new Date().toISOString(),
+      sampleCount: graph?.time_series?.samples?.length ?? 0,
+      forkIndex: meta.forkIndex ?? -1,
+      graph,
+    };
+    localStorage.setItem(`${SIM_MEMO_PREFIX}${key}`, JSON.stringify(payload));
+    let index = loadSimMemoIndex().filter((e) => e.key !== key);
+    index.unshift({
+      key,
+      savedAt: payload.savedAt,
+      sampleCount: payload.sampleCount,
+      forkIndex: payload.forkIndex,
+    });
+    const dropped = index.slice(MAX_SIM_MEMO_ENTRIES);
+    index = index.slice(0, MAX_SIM_MEMO_ENTRIES);
+    saveSimMemoIndex(index);
+    for (const e of dropped) {
+      localStorage.removeItem(`${SIM_MEMO_PREFIX}${e.key}`);
+    }
+  } catch {
+    /* quota or private mode */
+  }
+}
+
+function buildExportPayload() {
+  const intervalMin = getSnapshotIntervalMinutes();
+  const seed = 42;
+  const forkIndex = streamRecording?.forkIndex ?? -1;
+  const memoKey = computeSimMemoKey(getSimConfig(), seed, intervalMin, forkIndex);
+  const baseMeta = {
+    seed,
+    memoKey,
+    streaming: !!streamEventSource,
+    branchFidelityNote: BRANCH_FIDELITY_NOTE,
+  };
+  if (streamRecording?.layout?.groups) {
+    return streamRecording.toExportGraph(state, intervalMin, baseMeta);
+  }
+  return {
+    format: "plant-viz-recording",
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    partial: false,
+    branch_fidelity_note: BRANCH_FIDELITY_NOTE,
+    groups: state.groups,
+    group_links: state.group_links,
+    layout_meta: state.layout_meta,
+    edges: state.edges,
+    time_series: state.time_series,
+    flow_events: state.flow_events,
+    summary: state.summary,
+    block_statistics: state.block_statistics,
+    effective_config: state.effective_config,
+    config_snapshot: state.config_snapshot,
+    seed,
+    sample_interval_minutes: intervalMin,
+    memo_key: memoKey,
+  };
+}
+
+function exportRecording() {
+  const payload = buildExportPayload();
+  if (!payload.groups?.length && !payload.time_series?.samples?.length) return;
+  const blob = new Blob([JSON.stringify(payload, null, 2)], {
+    type: "application/json",
+  });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  const days = payload.config_snapshot?.simulation_days ?? "run";
+  const tag = payload.partial ? "partial" : "complete";
+  a.download = `plant-recording-${days}d-${tag}.json`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+function applyPartialFromRecording(recording) {
+  if (!recording?.layout?.groups) return;
+  state.groups = recording.layout.groups;
+  state.group_links = recording.layout.group_links || [];
+  state.layout_meta = recording.layout.layout_meta || {};
+  state.time_series = recording.toTimeSeries(getSnapshotIntervalMinutes());
+  state.flow_events = recording.flowEvents;
+  for (const g of state.groups || []) {
+    g._ux = g._ux || 0;
+    g._uy = g._uy || 0;
+  }
+  layoutAll(false);
+  setupTimeline();
+  draw();
+}
+
+function runStreamSimulation(simConfig) {
+  if (!window.SimRecording) {
+    return pollSimJobOnly(simConfig);
+  }
+  const recording = new window.SimRecording();
+  streamRecording = recording;
+  recording.reset();
+
+  return fetch("/api/sim/start", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      seed: 42,
+      sample_interval_minutes: getSnapshotIntervalMinutes(),
+      batch_size: 20,
+      config: simConfig,
+    }),
+  }).then((res) =>
+    res.json().then((started) => {
+      if (!res.ok) throw new Error(started.error || res.statusText);
+      if (!started.job_id) throw new Error("Server did not return job_id");
+      currentStreamJobId = started.job_id;
+      return new Promise((resolve, reject) => {
+        if (streamEventSource) streamEventSource.close();
+        const es = new EventSource(
+          `/api/sim/stream?job_id=${encodeURIComponent(started.job_id)}`
+        );
+        streamEventSource = es;
+        es.addEventListener("sim_init", (ev) => {
+          recording.applyInit(JSON.parse(ev.data));
+          applyPartialFromRecording(recording);
+        });
+        es.addEventListener("sim_fork", (ev) => {
+          recording.onFork(JSON.parse(ev.data));
+          timelineIndex = Math.min(timelineIndex, Math.max(0, recording.forkIndex));
+          playbackSampleIndex = timelineIndex;
+          timelineEl.value = String(timelineIndex);
+          applyPartialFromRecording(recording);
+          statusEl.textContent = `Recalculating from step ${recording.forkIndex}…`;
+        });
+        es.addEventListener("sim_batch", (ev) => {
+          recording.applyBatch(JSON.parse(ev.data));
+          applyPartialFromRecording(recording);
+          const n = recording.validMaxIndex() + 1;
+          statusEl.textContent = `Streaming… ${n} snapshot(s)`;
+        });
+        es.addEventListener("sim_done", () => {
+          es.close();
+          streamEventSource = null;
+          pollSimJob(started.job_id).then(resolve).catch(reject);
+        });
+        es.addEventListener("sim_error", (ev) => {
+          es.close();
+          streamEventSource = null;
+          let msg = "stream error";
+          try {
+            msg = JSON.parse(ev.data).error || msg;
+          } catch {
+            /* ignore */
+          }
+          reject(new Error(msg));
+        });
+      });
+    })
+  );
+}
+
+async function requestConfigBranch() {
+  if (!currentStreamJobId || !streamRecording) return;
+  const forkIndex = timelineIndex;
+  if (forkIndex < 0) return;
+  const simConfig = getSimConfig();
+  if (!simConfig) return;
+  streamRecording.truncateAfter(forkIndex);
+  statusEl.textContent = `Branching from step ${forkIndex}…`;
+  try {
+    const res = await fetch("/api/sim/branch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        job_id: currentStreamJobId,
+        fork_index: forkIndex,
+        config: simConfig,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || res.statusText);
+  } catch (e) {
+    errorEl.textContent = e.message;
+  }
+}
+
+function scheduleConfigBranch() {
+  if (!currentStreamJobId) return;
+  clearTimeout(configBranchTimer);
+  configBranchTimer = setTimeout(() => requestConfigBranch(), 500);
+}
+
+window.addEventListener("plant-config-changed", () => scheduleConfigBranch());
+
+async function pollSimJobOnly(simConfig) {
+  const res = await fetch("/api/simulate", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      seed: 42,
+      sample_interval_minutes: getSnapshotIntervalMinutes(),
+      config: simConfig,
+    }),
+  });
+  const started = await res.json();
+  if (!res.ok) throw new Error(started.error || res.statusText);
+  return pollSimJob(started.job_id);
 }
 
 async function refresh() {
@@ -1193,21 +1611,37 @@ async function refresh() {
   updateSimProgress("simulate", 0, 1, "Starting…");
   try {
     readPlaybackSettings();
-    const res = await fetch("/api/simulate", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        seed: 42,
-        sample_interval_minutes:
-          parseFloat(document.getElementById("inp-sample-interval").value) || 1,
-        config_overrides: buildOverrides(),
-      }),
-    });
-    const started = await res.json();
-    if (!res.ok) throw new Error(started.error || res.statusText);
-    if (!started.job_id) throw new Error("Server did not return job_id");
-    const data = await pollSimJob(started.job_id);
-    applySimulationResult(data);
+    const simConfig = getSimConfig();
+    if (!simConfig) throw new Error("Plant config not loaded");
+    const intervalMin = getSnapshotIntervalMinutes();
+    const seed = 42;
+    const memoKey = computeSimMemoKey(simConfig, seed, intervalMin, -1);
+    const cached = loadSimMemo(memoKey);
+    if (cached?.graph?.groups?.length) {
+      applySimulationResult(cached.graph, {
+        config: simConfig,
+        seed,
+        forkIndex: -1,
+        fromCache: true,
+      });
+      window.PlantConfigPresets?.renderPresetList?.();
+      statusEl.textContent = "Ready (cached)";
+      return;
+    }
+    const days = simConfig.objectives?.simulation_days ?? 1;
+    const close = simConfig.calendar?.wash_cutoff_time ?? "—";
+    const trSep = simConfig.transfers?.after_separation ?? "—";
+    updateSimProgress(
+      "simulate",
+      0,
+      days,
+      `Running ${days} day(s), close ${close}, after_separation ${trSep} min…`
+    );
+    const data = await runStreamSimulation(simConfig);
+    const forkIndex = streamRecording?.forkIndex ?? -1;
+    streamRecording = null;
+    applySimulationResult(data, { config: simConfig, seed: 42, forkIndex });
+    window.PlantConfigPresets?.renderPresetList?.();
     statusEl.textContent = "Ready";
   } catch (e) {
     errorEl.textContent = e.message;
@@ -1217,27 +1651,23 @@ async function refresh() {
   }
 }
 
-function buildOverrides() {
-  const o = { objectives: {} };
-  const ipt = document.getElementById("inp-items-per-truck").value;
-  if (ipt) o.items_per_truck = parseFloat(ipt);
-  const days = document.getElementById("inp-sim-days").value;
-  if (days) o.objectives.simulation_days = parseInt(days, 10);
-  const spot = document.getElementById("inp-pct-spot").value;
-  const steam = document.getElementById("inp-pct-steam").value;
-  if (spot || steam) {
-    o.routing = { after_separation: {} };
-    if (spot) o.routing.after_separation.pct_spotting = parseFloat(spot);
-    if (steam) o.routing.after_separation.pct_steam_tunnel = parseFloat(steam);
+function getSimConfig() {
+  if (window.PlantConfigEditor) {
+    window.PlantConfigEditor.flushToLiveConfig?.();
+    const cfg = window.PlantConfigEditor.getLiveConfig();
+    if (cfg) return cfg;
   }
-  const pr = document.getElementById("inp-press-rate").value;
-  if (pr) o.stages = { general_press: { throughput_items_per_hour: parseFloat(pr) } };
-  return o;
+  return null;
 }
 
 document.getElementById("btn-refresh").addEventListener("click", refresh);
 document.getElementById("btn-week").addEventListener("click", () => {
   document.getElementById("inp-sim-days").value = "7";
+  if (window.PlantConfigEditor) {
+    window.PlantConfigEditor.syncSimControlsToConfig();
+    const cfg = window.PlantConfigEditor.getLiveConfig();
+    if (cfg?.objectives) cfg.objectives.simulation_days = 7;
+  }
   refresh();
 });
 document.getElementById("btn-play").addEventListener("click", () => {
@@ -1252,12 +1682,14 @@ document.getElementById("btn-play").addEventListener("click", () => {
   document.getElementById("btn-play").textContent = playing ? "Pause" : "Play";
   if (playing) updateTimeLabel();
 });
+document.getElementById("btn-export-recording")?.addEventListener("click", exportRecording);
 document.getElementById("btn-live").addEventListener("click", () => {
   const s = samples();
   playing = false;
   document.getElementById("btn-play").textContent = "Play";
   if (s.length) {
-    playbackSampleIndex = s.length - 1;
+    const maxI = validPlaybackMaxIndex();
+    playbackSampleIndex = maxI;
     timelineIndex = playbackSampleIndex;
     timelineEl.value = String(playbackSampleIndex);
     syncEventCursorToTime(s[playbackSampleIndex].t);
@@ -1374,6 +1806,28 @@ window.addEventListener("resize", () => {
   if ((state.groups || []).length) fitViewToLayout();
 });
 
-resize();
-refresh();
-requestAnimationFrame(loop);
+async function bootstrap() {
+  resize();
+  initSnapshotIntervalControl();
+  try {
+    if (window.PlantConfigEditor) {
+      await window.PlantConfigEditor.loadBaseline();
+      const editor = document.getElementById("config-editor");
+      if (editor) window.PlantConfigEditor.renderEditor(editor);
+      window.PlantConfigEditor.updateJsonArea();
+      const days = document.getElementById("inp-sim-days");
+      const cfg = window.PlantConfigEditor.getLiveConfig();
+      if (days && cfg?.objectives) days.value = cfg.objectives.simulation_days;
+      window.PlantConfigPresets?.renderPresetList?.();
+    }
+  } catch (e) {
+    errorEl.textContent = `Config load failed: ${e.message}`;
+    statusEl.textContent = "Config error";
+    requestAnimationFrame(loop);
+    return;
+  }
+  refresh();
+  requestAnimationFrame(loop);
+}
+
+bootstrap();

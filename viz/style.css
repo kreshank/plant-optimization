@@ -79,7 +79,9 @@ main {
   color: #9aa0a6;
 }
 
-#sidebar input {
+#sidebar input,
+#sidebar select,
+#sidebar textarea {
   width: 100%;
   margin-top: 0.2rem;
   padding: 0.35rem;
@@ -87,6 +89,214 @@ main {
   border: 1px solid #3a3f4b;
   color: #e8eaed;
   border-radius: 3px;
+}
+
+#sidebar input.config-dirty,
+#sidebar select.config-dirty,
+#sidebar textarea.config-dirty {
+  border-color: #e9b949;
+  box-shadow: 0 0 0 1px rgba(233, 185, 73, 0.35);
+}
+
+.config-presets {
+  margin: 0.5rem 0 0.75rem;
+  border: 1px solid #3a3f4b;
+  border-radius: 4px;
+  padding: 0.45rem 0.6rem;
+}
+
+.config-presets summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: #c8ccd2;
+}
+
+.config-preset-toolbar {
+  display: flex;
+  gap: 0.35rem;
+  margin: 0.5rem 0 0.35rem;
+}
+
+.config-preset-toolbar input {
+  flex: 1;
+  min-width: 0;
+}
+
+.config-preset-io {
+  display: flex;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.5rem;
+}
+
+.config-preset-import-label {
+  cursor: pointer;
+  font-size: 0.85rem;
+  color: #9aa0a6;
+  border: 1px solid #3a3f4b;
+  border-radius: 3px;
+  padding: 0.2rem 0.5rem;
+  background: #1a1d24;
+}
+
+.config-preset-import-label:hover {
+  color: #e8eaed;
+}
+
+.config-preset-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.config-preset-item {
+  border-top: 1px solid #2a2e36;
+  padding: 0.45rem 0;
+}
+
+.config-preset-item.is-active {
+  background: rgba(233, 185, 73, 0.06);
+  margin: 0 -0.35rem;
+  padding-left: 0.35rem;
+  padding-right: 0.35rem;
+  border-radius: 3px;
+}
+
+.config-preset-head {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.config-preset-badge {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  color: #e9b949;
+  letter-spacing: 0.03em;
+}
+
+.config-preset-meta {
+  font-size: 0.75rem;
+  color: #7a8088;
+}
+
+.config-preset-diff {
+  font-size: 0.78rem;
+  color: #9aa0a6;
+  margin: 0.2rem 0 0.35rem;
+  line-height: 1.35;
+  word-break: break-word;
+}
+
+.config-preset-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+}
+
+.config-preset-actions .legend-btn {
+  font-size: 0.78rem;
+  padding: 0.15rem 0.4rem;
+}
+
+.config-preset-empty {
+  font-size: 0.85rem;
+  color: #7a8088;
+  padding: 0.35rem 0;
+}
+
+.config-editor fieldset {
+  border: 1px solid #3a3f4b;
+  border-radius: 4px;
+  margin: 0.5rem 0;
+  padding: 0.5rem 0.65rem;
+}
+
+.config-editor legend {
+  font-size: 0.85rem;
+  color: #b8bcc4;
+  padding: 0 0.25rem;
+}
+
+.config-stage {
+  margin: 0.35rem 0;
+}
+
+.config-stage summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: #c8ccd2;
+}
+
+.config-advanced {
+  margin-top: 0.75rem;
+}
+
+.config-duration-label {
+  display: block;
+  margin-top: 0.5rem;
+}
+
+.duration-field {
+  display: flex;
+  gap: 0.35rem;
+  align-items: center;
+  margin-top: 0.2rem;
+}
+
+.duration-field .duration-value {
+  flex: 1;
+  min-width: 0;
+  margin-top: 0;
+}
+
+.duration-field .duration-unit {
+  width: auto;
+  flex: 0 0 3.5rem;
+  margin-top: 0;
+  padding: 0.35rem 0.25rem;
+}
+
+#inp-config-json {
+  font-family: ui-monospace, monospace;
+  font-size: 0.75rem;
+  min-height: 120px;
+}
+
+#unit-detail {
+  font-size: 0.88rem;
+  line-height: 1.45;
+}
+
+.block-stats-summary {
+  margin: 0.5rem 0;
+  padding: 0.4rem 0;
+  border-top: 1px solid #3a3f4b;
+}
+
+.block-stats-daily {
+  margin-top: 0.6rem;
+}
+
+.block-stats-table {
+  width: 100%;
+  margin-top: 0.35rem;
+  border-collapse: collapse;
+  font-size: 0.8rem;
+}
+
+.block-stats-table th,
+.block-stats-table td {
+  padding: 0.2rem 0.35rem;
+  text-align: left;
+  border-bottom: 1px solid #2a2e36;
+}
+
+.block-stats-table th {
+  color: #9aa0a6;
+  font-weight: 600;
 }
 
 .sim-progress-wrap {

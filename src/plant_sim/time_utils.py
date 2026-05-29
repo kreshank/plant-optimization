@@ -58,7 +58,13 @@ def day_open_minutes(calendar: CalendarConfig) -> float:
     return time_to_minutes(parse_time_of_day(calendar.day_open_time))
 
 
+def wash_intake_cutoff_minutes(calendar: CalendarConfig) -> float:
+    """Last minute-of-day when new items may enter wash (may be before plant close)."""
+    return time_to_minutes(parse_time_of_day(calendar.wash_intake_cutoff_time))
+
+
 def wash_cutoff_minutes(calendar: CalendarConfig) -> float:
+    """Plant day close (playback horizon, snapshots, EOD dispatch)."""
     return time_to_minutes(parse_time_of_day(calendar.wash_cutoff_time))
 
 
@@ -67,14 +73,14 @@ def operating_window_bounds(
     last_calendar_day: int,
     calendar: CalendarConfig,
 ) -> tuple[float, float]:
-    """Sim-minute range from first day open through last day wash cutoff."""
+    """Sim-minute range from first day open through last day plant close."""
     start = first_calendar_day * 24 * 60 + day_open_minutes(calendar)
     end = last_calendar_day * 24 * 60 + wash_cutoff_minutes(calendar)
     return start, end
 
 
 def operating_window_minutes(calendar: CalendarConfig) -> float:
-    """Length of one operating day (open → wash cutoff)."""
+    """Length of one operating day (open → plant close)."""
     return max(0.0, wash_cutoff_minutes(calendar) - day_open_minutes(calendar))
 
 
