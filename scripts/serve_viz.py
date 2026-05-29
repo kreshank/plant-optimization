@@ -232,7 +232,7 @@ class VizHandler(SimpleHTTPRequestHandler):
                     overrides["objectives"]["simulation_days"] = int(
                         qs["simulation_days"][0]
                     )
-                interval = float(qs.get("sample_interval", ["5"])[0])
+                interval = float(qs.get("sample_interval", ["1"])[0])
                 job_id = self._start_sim_job(
                     seed=seed, interval=interval, overrides=overrides or None
                 )
@@ -258,7 +258,7 @@ class VizHandler(SimpleHTTPRequestHandler):
         try:
             overrides = payload.get("config_overrides", {})
             seed = int(payload.get("seed", 42))
-            interval = float(payload.get("sample_interval_minutes", 5))
+            interval = float(payload.get("sample_interval_minutes", 1))
             job_id = self._start_sim_job(
                 seed=seed,
                 interval=interval,

@@ -656,6 +656,11 @@ def build_group_layout(
         out_blocks,
         note="Trucks out",
         width_px=130,
+        group_backlog={
+            "lines": ["READY", "TO SHIP"],
+            "accent": "#dfe6e9",
+            "metric": "zone:completed_waiting",
+        },
     )
     outbound_from = (
         "outbound_scan"

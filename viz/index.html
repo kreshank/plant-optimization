@@ -27,7 +27,7 @@
           <input type="number" id="inp-sim-days" min="1" max="14" step="1" value="1" />
         </label>
         <label>Snapshot interval (sim minutes)
-          <input type="number" id="inp-sample-interval" min="1" max="60" step="1" value="5" title="Record plant state every N sim minutes" />
+          <input type="number" id="inp-sample-interval" min="1" max="60" step="1" value="1" title="Record plant state every N sim minutes" />
         </label>
         <p class="hint">Smaller = smoother queues &amp; washers; larger = faster re-run.</p>
         <div id="sim-progress-wrap" class="sim-progress-wrap hidden">
@@ -67,6 +67,14 @@
       <section id="unit-panel" class="hidden">
         <h2>Selected worker</h2>
         <div id="unit-detail">Click a washer, presser, or spotter.</div>
+      </section>
+      <section>
+        <h2>Outbound</h2>
+        <div id="outbound-kpi">—</div>
+      </section>
+      <section>
+        <h2>Model assumptions</h2>
+        <ul id="model-assumptions" class="model-assumptions">—</ul>
       </section>
       <section>
         <h2>Bottlenecks</h2>

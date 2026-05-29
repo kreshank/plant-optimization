@@ -74,6 +74,14 @@ def test_build_flow_graph_from_baseline():
         assert horizon > start
         for row in ts["samples"]:
             assert start - 0.01 <= row["t"] <= horizon + 0.01
+        moves = [e for e in graph["flow_events"] if e.get("kind") == "move"]
+        assert moves, "expected move events for playback dots"
+        last_move_t = max(e["t"] for e in moves)
+        last_sample_t = ts["samples"][-1]["t"]
+        assert last_move_t >= last_sample_t - 120, (
+            f"move events should cover late playback "
+            f"(last_move={last_move_t}, last_sample={last_sample_t})"
+        )
     press_g = next(g for g in graph["groups"] if g["id"] == "general_press")
     assert press_g.get("group_backlog", {}).get("metric") == "pool_sum:general_press"
     assert "press_conveyor" not in _block_ids(graph)

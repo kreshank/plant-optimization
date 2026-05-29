@@ -7,6 +7,8 @@ const ctx = canvas.getContext("2d");
 const statusEl = document.getElementById("status");
 const kpiEl = document.getElementById("kpi");
 const bottlenecksEl = document.getElementById("bottlenecks");
+const outboundKpiEl = document.getElementById("outbound-kpi");
+const modelAssumptionsEl = document.getElementById("model-assumptions");
 const errorEl = document.getElementById("error");
 const timeLabelEl = document.getElementById("time-label");
 const clockEl = document.getElementById("sim-clock");
@@ -54,6 +56,7 @@ const BACKLOG_PANEL_DEFAULT = 92;
 const BACKLOG_COUNT_AREA = 52;
 const BACKLOG_ANCHOR_NODES = {
   separation_backlog: "separation",
+  completed_goods: "outbound",
   press_conveyor: "general_press",
   post_scan_waiting: "wash",
   pre_scan_waiting: "inbound",
@@ -487,8 +490,16 @@ function syncEventCursorToTime(t) {
   eventCursor = c;
 }
 
+function updateOutboundKpiFromSample() {
+  const el = document.getElementById("kpi-completed-waiting");
+  if (!el) return;
+  const waiting = activeSample()?.zones?.completed_waiting;
+  el.textContent = waiting != null ? String(Math.round(waiting)) : "—";
+}
+
 function updateTimeLabel() {
   syncClockDisplays();
+  updateOutboundKpiFromSample();
   const s = samples();
   const idx = currentSampleIndex();
   const wall = formatWallClock(activeSample());
@@ -1051,20 +1062,53 @@ function showBlockDetail(bid) {
   }
 }
 
+function updateFlowEventsWarning() {
+  const s = state.summary || {};
+  const ts = state.time_series;
+  const warnings = [];
+  if (s.flow_events_truncated || (s.flow_events_dropped || 0) > 0) {
+    warnings.push(
+      `Flow recording capped (${s.flow_events_dropped || 0} dropped). Animated dots may stop early.`
+    );
+  }
+  if (s.flow_events_export_truncated) {
+    warnings.push("Move events subsampled for export; some playback steps may have no dots.");
+  }
+  const lastT = s.flow_events_last_t;
+  const horizon =
+    ts?.playback_horizon_minutes ?? s.playback_horizon_minutes ?? null;
+  if (lastT != null && horizon != null && lastT < horizon - 60) {
+    warnings.push(
+      `Last move event is before end of timeline (${Math.round(horizon - lastT)} sim-min gap).`
+    );
+  }
+  errorEl.textContent = warnings.join(" ");
+}
+
 function fillSidebar(data) {
   const s = data.summary || {};
   const c = data.config_snapshot || {};
   const ng = (data.groups || []).length;
   kpiEl.innerHTML = `
     <div>Injected: <strong>${Math.round(s.items_injected || 0)}</strong></div>
-    <div>Completed: <strong>${s.items_completed ?? "—"}</strong></div>
+    <div>Pipeline done: <strong>${s.items_completed ?? "—"}</strong></div>
     <div>Groups: <strong>${ng}</strong> · Washers: <strong>${c.washer_count ?? "—"}</strong></div>
     <div>Scan in: <strong>${c.scan_in_enabled ? "on" : "bypassed"}</strong></div>
   `;
+  outboundKpiEl.innerHTML = `
+    <div>Waiting to ship: <strong id="kpi-completed-waiting">—</strong></div>
+    <div>Shipped on trucks: <strong>${s.items_shipped ?? 0}</strong></div>
+    <div>Trucks departed: <strong>${s.trucks_departed ?? 0}</strong>${(s.partial_trucks || 0) > 0 ? ` · partial: ${s.partial_trucks}` : ""}</div>
+  `;
+  const assumptions = c.model_assumptions || [];
+  modelAssumptionsEl.innerHTML = assumptions.length
+    ? assumptions.map((line) => `<li>${line}</li>`).join("")
+    : "<li>—</li>";
   const bn = s.bottlenecks || [];
   bottlenecksEl.innerHTML = bn.length
     ? bn.slice(0, 6).map((b) => `${b.stage}: ${(b.utilization * 100).toFixed(0)}%`).join("<br>")
     : "—";
+  updateFlowEventsWarning();
   if (c.items_per_truck != null) document.getElementById("inp-items-per-truck").value = c.items_per_truck;
   if (c.simulation_days != null) document.getElementById("inp-sim-days").value = c.simulation_days;
   if (c.sample_interval_minutes != null) document.getElementById("inp-sample-interval").value = c.sample_interval_minutes;
@@ -1155,7 +1199,7 @@ async function refresh() {
       body: JSON.stringify({
         seed: 42,
         sample_interval_minutes:
-          parseFloat(document.getElementById("inp-sample-interval").value) || 5,
+          parseFloat(document.getElementById("inp-sample-interval").value) || 1,
         config_overrides: buildOverrides(),
       }),
     });

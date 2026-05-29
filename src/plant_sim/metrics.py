@@ -8,7 +8,8 @@ from plant_sim.config_models import PlantConfig
 from plant_sim.time_utils import deadline_minutes, format_minutes
 from plant_sim.unit_tracking import QueueTimeSeries, UnitMetrics, unit_id
 
-MAX_FLOW_EVENTS = 12_000
+MAX_FLOW_EVENTS = 500_000
+MAX_NON_MOVE_FLOW_EVENTS = 20_000
 
 
 @dataclass
@@ -46,6 +47,11 @@ class MetricsCollector:
     unit_metrics: dict[str, UnitMetrics] = field(default_factory=dict)
     queue_time_series: QueueTimeSeries | None = None
     flow_events: list[dict] = field(default_factory=list)
+    flow_events_dropped: int = 0
+    flow_events_truncated: bool = False
+    items_shipped: int = 0
+    trucks_departed: int = 0
+    partial_trucks: int = 0
     washer_max_queue: dict[str, float] = field(default_factory=dict)
     _sim_duration_minutes: float = 0.0
     playback_start_minutes: float = 0.0
@@ -126,8 +132,21 @@ class MetricsCollector:
     def log_flow_event(self, sim_minutes: float, kind: str, **fields) -> None:
         if not self._record_flow_events:
             return
-        if len(self.flow_events) >= MAX_FLOW_EVENTS:
-            return
+        is_move = kind == "move"
+        if is_move:
+            if len(self.flow_events) >= MAX_FLOW_EVENTS:
+                self.flow_events_dropped += 1
+                self.flow_events_truncated = True
+                return
+        else:
+            non_move = sum(1 for e in self.flow_events if e.get("kind") != "move")
+            if non_move >= MAX_NON_MOVE_FLOW_EVENTS:
+                self.flow_events_dropped += 1
+                return
+            if len(self.flow_events) >= MAX_FLOW_EVENTS:
+                self.flow_events_dropped += 1
+                self.flow_events_truncated = True
+                return
         row: dict = {"t": round(sim_minutes, 3), "kind": kind}
         row.update(fields)
         self.flow_events.append(row)
@@ -205,7 +224,13 @@ class MetricsCollector:
             "sim_duration_minutes": round(self._sim_duration_minutes, 2),
             "items_injected": self.items_injected,
             "items_completed": self.items_completed,
+            "items_shipped": self.items_shipped,
+            "trucks_departed": self.trucks_departed,
+            "partial_trucks": self.partial_trucks,
             "items_lost_estimate": round(self.items_lost, 2),
+            "flow_events_recorded": len(self.flow_events),
+            "flow_events_dropped": self.flow_events_dropped,
+            "flow_events_truncated": self.flow_events_truncated,
             "delivery_ready_time": ready_str,
             "delivery_ready_by_deadline": self.delivery_ready_by_deadline,
             "deadline": deadline,

@@ -33,6 +33,8 @@ from plant_sim.time_utils import (
     clock_from_sim,
     day_open_minutes,
     operating_window_bounds,
+    parse_time_of_day,
+    time_to_minutes,
     wash_cutoff_minutes,
     delay_for_shift,
     is_operating_day,
@@ -209,11 +211,14 @@ class PlantSimulation:
         if not stations:
             yield from self._run_stage(item_id, stage_name, from_node=from_node)
             return
-        yield from self._yield_calendar_wait(stage_name)
+        if stage_name != "separation":
+            yield from self._yield_calendar_wait(stage_name)
         if self.flow:
             self.flow.stage_start(item_id, stage_name, self.env.now)
         station = pick_shortest_worker(stations)
         yield station.submit(item_id, from_node)
+        if stage_name == "separation":
+            self._sync_separation_backlog()
         if self.flow:
             self.flow.stage_complete(item_id, stage_name, self.env.now)
 
@@ -223,6 +228,85 @@ class PlantSimulation:
 
     def _sync_separation_backlog(self) -> None:
         self.zones.separation_backlog = self._separation_backlog_depth()
+
+    def _outbound_policy_mode(self) -> str:
+        return self.config.policies.outbound_delivery.mode.lower()
+
+    def _uses_csv_outbound(self) -> bool:
+        return self._outbound_policy_mode() in ("csv_outgoing", "both")
+
+    def _uses_eod_outbound(self) -> bool:
+        return self._outbound_policy_mode() in ("end_of_day_cohort", "both")
+
+    def _truck_load_capacity(self) -> int:
+        return max(1, int(self.config.items_per_truck))
+
+    def _enqueue_completed_goods(self, item_id: int, *, from_node: str) -> None:
+        self.zones.completed_goods_buffer.append(item_id)
+        self.zones.completed_waiting = len(self.zones.completed_goods_buffer)
+        self.metrics.record_delivery_ready(
+            self.env.now,
+            day_open_minutes(self.config.calendar),
+        )
+        self.metrics.items_completed += 1
+        self._log_flow(
+            self.env.now,
+            "move",
+            fr=from_node,
+            to="completed_goods",
+            n=1,
+        )
+
+    def _dispatch_truck_load(self, count: int, *, partial: bool) -> int:
+        buf = self.zones.completed_goods_buffer
+        if count <= 0 or not buf:
+            return 0
+        n = min(count, len(buf))
+        for _ in range(n):
+            buf.popleft()
+        self.zones.completed_waiting = len(buf)
+        self.metrics.items_shipped += n
+        self.metrics.trucks_departed += 1
+        if partial or n < self._truck_load_capacity():
+            self.metrics.partial_trucks += 1
+        self._log_flow(
+            self.env.now,
+            "truck_departure",
+            fr="completed_goods",
+            to="truck_out",
+            count=n,
+            partial=partial or n < self._truck_load_capacity(),
+        )
+        return n
+
+    def _dispatch_full_trucks(self) -> int:
+        cap = self._truck_load_capacity()
+        shipped = 0
+        while len(self.zones.completed_goods_buffer) >= cap:
+            shipped += self._dispatch_truck_load(cap, partial=False)
+        return shipped
+
+    def _flush_outbound_end_of_day(self, operating_day_num: int) -> None:
+        cap = self._truck_load_capacity()
+        self._dispatch_full_trucks()
+        buf = self.zones.completed_goods_buffer
+        if not buf:
+            return
+        if operating_day_num == 1:
+            self._dispatch_truck_load(len(buf), partial=True)
+        # Later days: leave remainder in buffer until a full truck is available.
+
+    def _end_of_day_outbound(self, calendar_day: int, operating_day_num: int):
+        if not self._uses_eod_outbound():
+            return
+        policy = self.config.policies.outbound_delivery
+        dispatch_at = policy.dispatch_time or self.config.calendar.wash_cutoff_time
+        dispatch_min = time_to_minutes(parse_time_of_day(dispatch_at))
+        target = calendar_day * 24 * 60 + dispatch_min
+        delay = max(0.0, target - self.env.now)
+        if delay > 0:
+            yield self.env.timeout(delay)
+        self._flush_outbound_end_of_day(operating_day_num)
 
     def _inbound_backlog_depth(self) -> int:
         total = self.zones.pre_scan_waiting
@@ -276,6 +360,9 @@ class PlantSimulation:
             "post_scan_waiting": self.zones.post_scan_waiting,
             "inbound_backlog": self._inbound_backlog_depth(),
             "separation_backlog": self._separation_backlog_depth(),
+            "completed_waiting": self.zones.completed_waiting,
+            "items_shipped": self.metrics.items_shipped,
+            "trucks_departed": self.metrics.trucks_departed,
             "scan_workers": self.zones.snapshot_scan_workers(self._scan_stations),
         }
         return {
@@ -466,7 +553,7 @@ class PlantSimulation:
             n=1,
         )
         yield from self._run_worker_station(
-            item_id, "separation", from_node=washer_id
+            item_id, "separation", from_node="separation_backlog"
         )
         self._sync_separation_backlog()
 
@@ -487,19 +574,18 @@ class PlantSimulation:
             return
 
         yield from self._transfer_delay("after_final_qc")
+        last_scan_node = "final_qc"
         if self.config.stages.delivery_scan.enabled:
             yield from self._run_stage(item_id, "delivery_scan", from_node="final_qc")
             yield from self._transfer_delay("after_delivery_scan")
+            last_scan_node = "delivery_scan"
             if self.config.stages.outbound_scan.enabled:
                 yield from self._run_stage(
                     item_id, "outbound_scan", from_node="delivery_scan"
                 )
                 yield from self._transfer_delay("after_outbound_scan")
-            self.metrics.record_delivery_ready(
-                self.env.now,
-                day_open_minutes(self.config.calendar),
-            )
-        self.metrics.items_completed += 1
+                last_scan_node = "outbound_scan"
+        self._enqueue_completed_goods(item_id, from_node=last_scan_node)
 
     def _wip_spotting_pipeline(self, item_id: int):
         """Mid-spotting WIP: enters spotting directly, not via separation backlog (washer output)."""
@@ -526,21 +612,19 @@ class PlantSimulation:
         yield from self._transfer_delay("after_separation")
 
         path = self._route_after_separation()
-        before_qc = "separation_backlog"
+        before_qc = "separation"
         if path == "spotting":
             if self.flow:
                 self.flow.set_qc_path(item_id, "spotting_path")
             yield from self._run_worker_station(
-                item_id, "spotting", from_node="separation_backlog"
+                item_id, "spotting", from_node="separation"
             )
             yield from self._transfer_delay("after_spotting")
             yield from self._run_general_press(item_id, from_node="press_conveyor")
             yield from self._transfer_delay("after_general_press")
             before_qc = "general_press"
         elif path == "steam_tunnel":
-            yield from self._run_stage(
-                item_id, "steam_tunnel", from_node="separation_backlog"
-            )
+            yield from self._run_stage(item_id, "steam_tunnel", from_node="separation")
             yield from self._transfer_delay("after_steam_tunnel")
             yield from self._steam_post_check(item_id)
             if self._route_after_steam() == "general_press":
@@ -559,16 +643,14 @@ class PlantSimulation:
             if self.flow:
                 self.flow.set_qc_path(item_id, "jacket_path")
             yield from self._run_worker_station(
-                item_id, "jacket_press", from_node="separation_backlog"
+                item_id, "jacket_press", from_node="separation"
             )
             yield from self._transfer_delay("after_jacket_press")
             before_qc = "jacket_press"
         else:
             if self.flow:
                 self.flow.set_qc_path(item_id, "press_path")
-            yield from self._run_general_press(
-                item_id, from_node="separation_backlog"
-            )
+            yield from self._run_general_press(item_id, from_node="separation")
             yield from self._transfer_delay("after_general_press")
             before_qc = "general_press"
 
@@ -620,6 +702,13 @@ class PlantSimulation:
                 fr="truck_in",
             )
             self._inject_items(wave.total_items(self.config.items_per_truck))
+            return
+        if wave.direction == "outgoing" and self._uses_csv_outbound():
+            cap = self._truck_load_capacity()
+            buf_len = len(self.zones.completed_goods_buffer)
+            if buf_len < cap:
+                return
+            self._dispatch_truck_load(cap, partial=False)
 
     def _report_progress(
         self,
@@ -661,6 +750,9 @@ class PlantSimulation:
                 day_name = DAY_NAMES[weekday]
                 for wave in self._schedule_by_weekday.get(day_name, []):
                     self.env.process(self._truck_arrival(wave, calendar_day))
+                self.env.process(
+                    self._end_of_day_outbound(calendar_day, operating_count + 1)
+                )
                 operating_count += 1
                 self._report_progress(
                     progress_callback,
@@ -744,7 +836,7 @@ def run_simulation(
         seed=seed,
         track_flow=track_flow,
         sample_interval_minutes=sample_interval_minutes,
-        record_flow_events=not viz_mode,
+        record_flow_events=True,
     )
     drain_days = 1.0 if viz_mode else None
     return sim.run(

@@ -181,7 +181,10 @@ class QcReworkPolicy(BaseModel):
 
 
 class OutboundDeliveryPolicy(BaseModel):
-    mode: str = "end_of_day_cohort"
+    """end_of_day_cohort | csv_outgoing | both — see engine outbound dispatch."""
+
+    mode: str = "both"
+    dispatch_time: str | None = None
 
 
 class PoliciesConfig(BaseModel):

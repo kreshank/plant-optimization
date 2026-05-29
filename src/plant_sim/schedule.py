@@ -33,7 +33,9 @@ class TruckWave:
 
 
 def load_truck_schedule(config: PlantConfig, project_root: Path) -> list[TruckWave]:
-    path = project_root / config.inputs.truck_schedule
+    path = Path(config.inputs.truck_schedule)
+    if not path.is_absolute():
+        path = project_root / path
     if not path.exists():
         raise FileNotFoundError(f"Truck schedule not found: {path}")
     df = pd.read_csv(path)

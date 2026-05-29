@@ -120,6 +120,8 @@ def test_pick_fill_first_washer_unit():
 
             self.wdef = type("W", (), {"capacity_items": cap})()
 
+            self.zones = None
+
 
 
         @property
@@ -160,17 +162,31 @@ def test_pick_fill_first_washer_unit():
 
     assert pick.washer_id == "a:0"
 
+    zones = type(
+        "Z",
+        (),
+        {"last_cycle_washer_id": None, "active_washer_id": None},
+    )()
+
     empty = [_Line("b:0", 0, 10), _Line("b:1", 0, 20)]
+
+    for ln in empty:
+
+        ln.zones = zones
 
     first = choose_active_filler(empty, pool)
 
+    assert first is not None
+
+    assert first.washer_id == "b:0"
+
+    zones.last_cycle_washer_id = "b:0"
+
     second = choose_active_filler(empty, pool)
 
-    assert first is not None and second is not None
+    assert second is not None
 
-    assert first.washer_id == "b:1"
-
-    assert second.washer_id == "b:0"
+    assert second.washer_id == "b:1"
 
 
 
@@ -398,6 +414,66 @@ def test_post_scan_waiting_can_hold_reserve():
     ]
 
     assert max(peaks) > 0
+
+
+
+
+
+@pytest.mark.skipif(
+
+    not (ROOT / "config" / "baseline.yaml").exists(),
+
+    reason="local baseline not present",
+
+)
+
+def test_sequential_drum_order_standard_before_fast():
+
+    """After drum 1, empty drums fill in washer_id order (bin 2 before bin 3)."""
+
+    from plant_sim.scenarios import load_scenario
+
+    config = load_scenario(None, ROOT)
+
+    config.objectives.simulation_days = 1
+
+    result = run_simulation(
+
+        config, project_root=ROOT, seed=9, sample_interval_minutes=5
+
+    )
+
+    bin_moves = [
+
+        e
+
+        for e in result.metrics.flow_events
+
+        if e.get("kind") == "move" and str(e.get("to", "")).endswith(":bin")
+
+    ]
+
+    assert bin_moves
+
+    order: list[str] = []
+
+    for e in bin_moves:
+
+        wid = str(e["to"]).replace(":bin", "")
+
+        if wid not in order:
+
+            order.append(wid)
+
+    assert order[0] == "washer_standard:0"
+
+    if len(order) > 1:
+
+        assert order[1] == "washer_standard:1", f"second drum was {order[1]}, order={order}"
+
+    if "washer_fast:0" in order and "washer_standard:1" in order:
+
+        assert order.index("washer_standard:1") < order.index("washer_fast:0")
 
 
 

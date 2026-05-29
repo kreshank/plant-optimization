@@ -21,6 +21,44 @@ def _productive_hours(config: PlantConfig) -> float:
     return max(hours, 1.0)
 
 
+MAX_VIZ_FLOW_EVENTS = 80_000
+MAX_VIZ_NON_MOVE_EVENTS = 4_000
+
+
+def export_flow_events_for_viz(
+    events: list[dict],
+    start: float,
+    horizon: float,
+    *,
+    max_moves: int = MAX_VIZ_FLOW_EVENTS,
+    max_non_moves: int = MAX_VIZ_NON_MOVE_EVENTS,
+) -> tuple[list[dict], dict]:
+    """Keep all move events in the playback window; cap batch/truck metadata separately."""
+    in_window = [
+        e
+        for e in events
+        if start - 0.001 <= e.get("t", 0) <= horizon + 0.001
+    ]
+    moves = [e for e in in_window if e.get("kind") == "move"]
+    other = [e for e in in_window if e.get("kind") != "move"]
+    export_truncated = False
+    if len(moves) > max_moves:
+        step = max(1, len(moves) // max_moves)
+        moves = moves[::step]
+        export_truncated = True
+    if len(other) > max_non_moves:
+        step = max(1, len(other) // max_non_moves)
+        other = other[::step]
+    exported = sorted(moves + other, key=lambda e: e.get("t", 0))
+    meta = {
+        "flow_events_exported": len(exported),
+        "flow_events_moves_exported": len(moves),
+        "flow_events_export_truncated": export_truncated,
+        "flow_events_last_t": exported[-1]["t"] if exported else None,
+    }
+    return exported, meta
+
+
 def _edges_from_flow_events(
     config: PlantConfig, result: SimulationResult
 ) -> list[dict[str, Any]]:
@@ -69,14 +107,14 @@ def build_flow_graph(
             horizon_minutes=horizon if horizon > 0 else None,
         )
 
-    events = [
-        e
-        for e in result.metrics.flow_events
-        if start - 0.001 <= e.get("t", 0) <= horizon + 0.001
-    ]
-    if len(events) > 4000:
-        step = max(1, len(events) // 4000)
-        events = events[::step]
+    events, flow_meta = export_flow_events_for_viz(
+        result.metrics.flow_events, start, horizon
+    )
+    summary = dict(result.summary)
+    summary.update(flow_meta)
+    if result.metrics.flow_events_truncated:
+        summary["flow_events_truncated"] = True
+    summary["flow_events_dropped"] = result.metrics.flow_events_dropped
 
     return {
         "groups": layout["groups"],
@@ -85,7 +123,7 @@ def build_flow_graph(
         "edges": _edges_from_flow_events(config, result),
         "time_series": ts_payload,
         "flow_events": events,
-        "summary": result.summary,
+        "summary": summary,
         "config_snapshot": {
             "items_per_truck": config.items_per_truck,
             "daily_target": config.objectives.daily_items_target,
@@ -107,8 +145,27 @@ def build_flow_graph(
                 "press_direct": r.general_press_pct(),
                 "steam_repress": config.routing.after_steam.pct_needs_press,
             },
+            "transfers": config.transfers.model_dump(),
+            "model_assumptions": _model_assumptions(config),
         },
     }
+
+
+def _model_assumptions(config: PlantConfig) -> list[str]:
+    """Human-readable limits of the DES model for the viz sidebar."""
+    t = config.transfers
+    lines = [
+        "Moves animate from flow_events; queues come from snapshots.",
+        f"Inter-stage delays: after_wash {t.after_wash} min, after_separation "
+        f"{t.after_separation} min, after_final_qc {t.after_final_qc} min (no cart travel).",
+        "No conveyor WIP between building zones — items jump queue-to-queue after delay.",
+        "Utilization divides service time by full sim duration (includes nights/off-shift).",
+    ]
+    if not config.stages.scan_in.enabled:
+        lines.append("Scan-in bypassed: truck → pre-scan / wash backlog directly.")
+    mode = config.policies.outbound_delivery.mode
+    lines.append(f"Outbound dispatch: {mode} (see completed-waiting / shipped KPIs).")
+    return lines
 
 
 def config_to_jsonable(config: PlantConfig) -> dict[str, Any]:

@@ -184,6 +184,24 @@ canvas {
   margin-top: 0.5rem;
 }
 
+.model-assumptions {
+  margin: 0;
+  padding-left: 1.1rem;
+  font-size: 0.8rem;
+  line-height: 1.35;
+  color: #b8bcc4;
+}
+
+.model-assumptions li {
+  margin-bottom: 0.35rem;
+}
+
+#error {
+  color: #ffb347;
+  font-size: 0.85rem;
+  margin-top: 0.35rem;
+}
+
 .hint {
   color: #9aa0a6;
   margin: 0 0 0.5rem;

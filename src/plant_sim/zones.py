@@ -30,7 +30,11 @@ class PlantZoneState:
     item_washer_line: dict[int, str] = field(default_factory=dict)
     """Only this washer may pull from post_scan_fifo until it starts a cycle."""
     active_washer_id: str | None = None
+    """Last drum that started a wash cycle (sequential empty-drum selection)."""
+    last_cycle_washer_id: str | None = None
     separation_backlog: int = 0
+    completed_goods_buffer: deque[int] = field(default_factory=deque)
+    completed_waiting: int = 0
 
     def snapshot_scan_workers(self, stations: list[ScanStation]) -> dict[str, dict]:
         return {
@@ -389,6 +393,7 @@ class WasherBinLine:
         self.cycle_started_at = self.env.now
         if self.zones.active_washer_id == self.washer_id:
             self.zones.active_washer_id = None
+        self.zones.last_cycle_washer_id = self.washer_id
         self.log_event(
             self.env.now,
             "wash_batch_start",
@@ -483,13 +488,21 @@ def choose_active_filler(
     if partial:
         return max(partial, key=lambda ln: (ln.bin_fill, ln.wdef.capacity_items))
 
-    ranked = sorted(
-        idle,
-        key=lambda ln: (-ln.wdef.capacity_items, ln.washer_id),
-    )
-    idx = pool.dispatch_index % len(ranked)
-    pool.dispatch_index = (pool.dispatch_index + 1) % len(ranked)
-    return ranked[idx]
+    empty_idle = [
+        ln
+        for ln in lines
+        if not ln.in_cycle and ln.bin_fill < ln.wdef.capacity_items and ln.bin_fill == 0
+    ]
+    if not empty_idle:
+        return None
+
+    zones = getattr(lines[0], "zones", None) if lines else None
+    if zones is not None and zones.last_cycle_washer_id:
+        ids = [ln.washer_id for ln in empty_idle]
+        last = zones.last_cycle_washer_id
+        if last in ids:
+            return empty_idle[(ids.index(last) + 1) % len(empty_idle)]
+    return empty_idle[0]
 
 
 def pick_fill_first_washer(

@@ -33,10 +33,11 @@ def time_to_minutes(t: time) -> float:
 
 
 def minutes_to_time(minutes: float) -> time:
+    """Convert minutes-since-midnight to time; tolerates float drift."""
     minutes = minutes % (24 * 60)
-    h = int(minutes // 60)
-    m = int(minutes % 60)
-    s = int(round((minutes % 1) * 60))
+    total_seconds = int(round(minutes * 60)) % (24 * 3600)
+    h, rem = divmod(total_seconds, 3600)
+    m, s = divmod(rem, 60)
     return time(h, m, s)
 
 
